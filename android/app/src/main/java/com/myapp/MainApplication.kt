@@ -9,8 +9,10 @@ import com.facebook.react.ReactHost
 import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 
-import com.oney.WebRTCModule.WebRTCModuleOptions
+import com.livekit.reactnative.LiveKitReactNative
+import com.livekit.reactnative.audio.AudioType
 
+import com.oney.WebRTCModule.WebRTCModuleOptions
 import org.webrtc.audio.JavaAudioDeviceModule
 
 class MainApplication : Application(), ReactApplication {
@@ -20,8 +22,7 @@ class MainApplication : Application(), ReactApplication {
       context = applicationContext,
       packageList =
         PackageList(this).packages.apply {
-          // Packages that cannot be autolinked yet can be added manually here
-          // add(MyReactNativePackage())
+          // Add any manually linked packages here
         },
     )
   }
@@ -29,11 +30,16 @@ class MainApplication : Application(), ReactApplication {
   override fun onCreate() {
     super.onCreate()
 
-    // Configure WebRTC audio module BEFORE React Native initializes
+    // ── LiveKit: must be first, before React Native initialises ──
+    // CommunicationAudioType enables echo cancellation & voice processing
+    LiveKitReactNative.setup(this, AudioType.CommunicationAudioType())
+
+    // ── WebRTC audio device module (optional fine-tuning) ──
     val options = WebRTCModuleOptions.getInstance()
+    options.enableMediaProjectionService = true  // Required for screen share on Android
 
     val audioAttributes = AudioAttributes.Builder()
-      .setUsage(AudioAttributes.USAGE_MEDIA)
+      .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
       .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
       .build()
 
