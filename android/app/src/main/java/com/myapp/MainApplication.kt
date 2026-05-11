@@ -1,3 +1,5 @@
+// android/app/src/main/java/com/myapp/MainApplication.kt
+
 package com.myapp
 
 import android.app.Application
@@ -15,39 +17,38 @@ import com.livekit.reactnative.audio.AudioType
 import com.oney.WebRTCModule.WebRTCModuleOptions
 import org.webrtc.audio.JavaAudioDeviceModule
 
+import com.myapp.pip.PipPackage   // ← our zero-dependency PiP package
+
 class MainApplication : Application(), ReactApplication {
 
-  override val reactHost: ReactHost by lazy {
-    getDefaultReactHost(
-      context = applicationContext,
-      packageList =
-        PackageList(this).packages.apply {
-          // Add any manually linked packages here
-        },
-    )
-  }
+    override val reactHost: ReactHost by lazy {
+        getDefaultReactHost(
+            context = applicationContext,
+            packageList =
+                PackageList(this).packages.apply {
+                    add(PipPackage())  // ← register PiP native module
+                },
+        )
+    }
 
-  override fun onCreate() {
-    super.onCreate()
+    override fun onCreate() {
+        super.onCreate()
 
-    // ── LiveKit: must be first, before React Native initialises ──
-    // CommunicationAudioType enables echo cancellation & voice processing
-    LiveKitReactNative.setup(this, AudioType.CommunicationAudioType())
+        LiveKitReactNative.setup(this, AudioType.CommunicationAudioType())
 
-    // ── WebRTC audio device module (optional fine-tuning) ──
-    val options = WebRTCModuleOptions.getInstance()
-    options.enableMediaProjectionService = true  // Required for screen share on Android
+        val options = WebRTCModuleOptions.getInstance()
+        options.enableMediaProjectionService = true
 
-    val audioAttributes = AudioAttributes.Builder()
-      .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-      .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-      .build()
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
 
-    options.audioDeviceModule =
-      JavaAudioDeviceModule.builder(this)
-        .setAudioAttributes(audioAttributes)
-        .createAudioDeviceModule()
+        options.audioDeviceModule =
+            JavaAudioDeviceModule.builder(this)
+                .setAudioAttributes(audioAttributes)
+                .createAudioDeviceModule()
 
-    loadReactNative(this)
-  }
+        loadReactNative(this)
+    }
 }

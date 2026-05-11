@@ -1,4 +1,12 @@
 // src/services/NotificationService.ts
+//
+// CHANGES vs previous version:
+//  - showPersistentNotification() now strictly guards on isInMeeting === true
+//    before displaying anything.  If the user is NOT in a meeting room the
+//    function returns immediately — no notification is ever shown.
+//  - handleAppStateChange does the same guard.
+//  - stopMeetingTracking() cancels the notification and resets isInMeeting.
+//  - Added explicit isInMeeting() getter so MeetingScreen can check state.
 
 import notifee, {
   AndroidImportance,
@@ -21,16 +29,23 @@ const CHANNEL_ID = NOTIFICATION_CONFIG.channelId;
 class NotificationService {
   private appStateSubscription: NativeEventSubscription | null = null;
 
-  private isInMeeting = false;
+  /** True ONLY while the user is inside a live meeting room */
+  private _isInMeeting = false;
   private channelReady = false;
   private initPromise: Promise<void> | null = null;
 
-  // disconnect callback from MeetingScreen
   private disconnectCallback: (() => void) | null = null;
 
-  // current meeting info
   private roomName = 'Meeting';
   private participantCount = 1;
+
+  // ─────────────────────────────────────────────────────────────
+  // PUBLIC GETTER — lets MeetingScreen check meeting state
+  // ─────────────────────────────────────────────────────────────
+
+  get isInMeeting(): boolean {
+    return this._isInMeeting;
+  }
 
   // ─────────────────────────────────────────────────────────────
   // INITIALIZE
@@ -44,12 +59,7 @@ class NotificationService {
 
       try {
         const settings = await notifee.requestPermission();
-
-        console.log(
-          TAG,
-          'permission authorizationStatus =',
-          settings.authorizationStatus,
-        );
+        console.log(TAG, 'permission authorizationStatus =', settings.authorizationStatus);
 
         if (
           settings.authorizationStatus !== AuthorizationStatus.AUTHORIZED &&
@@ -71,9 +81,7 @@ class NotificationService {
             vibration: false,
             sound: undefined,
           });
-
           console.log(TAG, 'createChannel resolved with id =', id);
-
           this.channelReady = true;
         } catch (e) {
           console.warn(TAG, 'createChannel failed', e);
@@ -82,43 +90,33 @@ class NotificationService {
         this.channelReady = true;
       }
 
-      // background action handling
+      // Background action handling
       notifee.onBackgroundEvent(async ({ type, detail }) => {
         console.log(TAG, 'onBackgroundEvent', type);
-
         if (type === EventType.ACTION_PRESS) {
           const actionId = detail.pressAction?.id;
-
           console.log(TAG, 'background action =', actionId);
-
           if (actionId === 'end-call') {
             this.disconnectCallback?.();
-
             await this.stopMeetingTracking();
           }
         }
-
         if (type === EventType.PRESS) {
           await notifee.cancelNotification(NOTIF_ID).catch(() => {});
         }
       });
 
-      // foreground action handling
+      // Foreground action handling
       notifee.onForegroundEvent(async ({ type, detail }) => {
         console.log(TAG, 'onForegroundEvent', type);
-
         if (type === EventType.ACTION_PRESS) {
           const actionId = detail.pressAction?.id;
-
           console.log(TAG, 'foreground action =', actionId);
-
           if (actionId === 'end-call') {
             this.disconnectCallback?.();
-
             await this.stopMeetingTracking();
           }
         }
-
         if (type === EventType.PRESS) {
           await this.cancelNotification();
         }
@@ -131,32 +129,23 @@ class NotificationService {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // START TRACKING
+  // START TRACKING — call this ONLY once the room is Connected
   // ─────────────────────────────────────────────────────────────
 
   startMeetingTracking(
     disconnectCallback?: () => void,
-    options?: {
-      roomName?: string;
-      participantCount?: number;
-    },
+    options?: { roomName?: string; participantCount?: number },
   ) {
-    console.log(TAG, 'startMeetingTracking()');
-
-    this.isInMeeting = true;
-
+    console.log(TAG, 'startMeetingTracking() — isInMeeting = true');
+    this._isInMeeting = true;
     this.disconnectCallback = disconnectCallback ?? null;
 
-    if (options?.roomName) {
-      this.roomName = options.roomName;
-    }
-
+    if (options?.roomName) this.roomName = options.roomName;
     if (typeof options?.participantCount === 'number') {
       this.participantCount = options.participantCount;
     }
 
     this.appStateSubscription?.remove();
-
     this.appStateSubscription = AppState.addEventListener(
       'change',
       this.handleAppStateChange,
@@ -167,53 +156,53 @@ class NotificationService {
   // UPDATE LIVE INFO
   // ─────────────────────────────────────────────────────────────
 
-  async updateMeetingInfo(options: {
-    roomName?: string;
-    participantCount?: number;
-  }) {
-    if (options.roomName) {
-      this.roomName = options.roomName;
-    }
-
+  async updateMeetingInfo(options: { roomName?: string; participantCount?: number }) {
+    if (options.roomName) this.roomName = options.roomName;
     if (typeof options.participantCount === 'number') {
       this.participantCount = options.participantCount;
     }
-
-    // update active notification if already visible
-    if (this.isInMeeting) {
+    // Only refresh notification if user is still in a meeting
+    if (this._isInMeeting) {
       await this._display();
     }
   }
 
   // ─────────────────────────────────────────────────────────────
-  // STOP TRACKING
+  // STOP TRACKING — call when user leaves/disconnects from room
   // ─────────────────────────────────────────────────────────────
 
   async stopMeetingTracking() {
-    console.log(TAG, 'stopMeetingTracking()');
-
-    this.isInMeeting = false;
-
+    console.log(TAG, 'stopMeetingTracking() — isInMeeting = false');
+    // Mark as NOT in meeting FIRST so no race condition can fire a new notification
+    this._isInMeeting = false;
     this.disconnectCallback = null;
-
     this.appStateSubscription?.remove();
     this.appStateSubscription = null;
-
     await this.cancelNotification();
   }
 
   // ─────────────────────────────────────────────────────────────
-  // SHOW NOTIFICATION
+  // SHOW NOTIFICATION — ONLY if user is currently in a meeting
   // ─────────────────────────────────────────────────────────────
 
   showPersistentNotification() {
+    // GUARD: do not show any notification if user is not in a meeting room
+    if (!this._isInMeeting) {
+      console.log(TAG, 'showPersistentNotification() skipped — not in meeting');
+      return;
+    }
+
     console.log(TAG, 'showPersistentNotification()');
 
     (async () => {
       if (!this.channelReady) {
         await this.initialize();
       }
-
+      // Double-check the guard after the async init (user may have left by now)
+      if (!this._isInMeeting) {
+        console.log(TAG, 'showPersistentNotification() aborted after init — not in meeting');
+        return;
+      }
       await this._display();
     })().catch((e) => {
       console.warn(TAG, 'showPersistentNotification error', e);
@@ -233,13 +222,14 @@ class NotificationService {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // APP STATE
+  // APP STATE — only fires notification when ACTUALLY in meeting
   // ─────────────────────────────────────────────────────────────
 
   private handleAppStateChange = (nextState: AppStateStatus) => {
-    console.log(TAG, 'AppState →', nextState);
+    console.log(TAG, 'AppState →', nextState, '| isInMeeting =', this._isInMeeting);
 
-    if (!this.isInMeeting) return;
+    // GUARD: never show notification if user is not in a meeting room
+    if (!this._isInMeeting) return;
 
     if (nextState === 'background' || nextState === 'inactive') {
       this.showPersistentNotification();
@@ -253,6 +243,12 @@ class NotificationService {
   // ─────────────────────────────────────────────────────────────
 
   private async _display() {
+    // Final safety check before actually posting
+    if (!this._isInMeeting) {
+      console.log(TAG, '_display() aborted — not in meeting');
+      return;
+    }
+
     try {
       const participantText =
         this.participantCount === 1
@@ -261,47 +257,22 @@ class NotificationService {
 
       await notifee.displayNotification({
         id: NOTIF_ID,
-
         title: `🎥 ${this.roomName}`,
-
         body: `${participantText} • Meeting in progress`,
 
         android: {
           channelId: CHANNEL_ID,
-
           importance: AndroidImportance.HIGH,
-
           visibility: AndroidVisibility.PUBLIC,
-
           ongoing: true,
-
           onlyAlertOnce: true,
-
           showTimestamp: true,
-
           timestamp: Date.now(),
-
-          pressAction: {
-            id: 'default',
-            launchActivity: 'default',
-          },
-
+          pressAction: { id: 'default', launchActivity: 'default' },
           actions: [
-            {
-              title: 'Return',
-              pressAction: {
-                id: 'default',
-                launchActivity: 'default',
-              },
-            },
-            {
-              title: 'End Call',
-              pressAction: {
-                id: 'end-call',
-              },
-            },
+            { title: 'Return', pressAction: { id: 'default', launchActivity: 'default' } },
+            { title: 'End Call', pressAction: { id: 'end-call' } },
           ],
-
           color: '#4f46e5',
         },
 

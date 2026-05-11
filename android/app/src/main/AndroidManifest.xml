@@ -50,7 +50,14 @@
             android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
-            android:exported="true">
+            android:exported="true"
+            android:supportsPictureInPicture="true">
+            <!--
+                ↑ ADDED: android:supportsPictureInPicture="true"
+                Required for Android PiP mode to work.
+                The configChanges above already include screenSize|smallestScreenSize|screenLayout|orientation
+                which are all required for PiP — no additional configChanges needed.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -1,5 +1,8 @@
+// android/app/src/main/java/com/myapp/MainActivity.kt
+
 package com.myapp
 
+import android.content.res.Configuration
 import android.os.Bundle
 
 import com.facebook.react.ReactActivity
@@ -8,26 +11,31 @@ import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnable
 import com.facebook.react.defaults.DefaultReactActivityDelegate
 
 import com.oney.WebRTCModule.WebRTCModuleOptions
+import com.myapp.pip.PipModule   // ← our own module, zero npm deps
 
 class MainActivity : ReactActivity() {
 
-  override fun onCreate(savedInstanceState: Bundle?) {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        val options = WebRTCModuleOptions.getInstance()
+        options.enableMediaProjectionService = true
+        super.onCreate(savedInstanceState)
+    }
 
-    // Initialize the WebRTC module options
-    val options = WebRTCModuleOptions.getInstance()
-    options.enableMediaProjectionService = true
+    /**
+     * Android fires this whenever PiP mode enters or exits.
+     * We forward it to our PipModule so the JS NativeEventEmitter
+     * can notify usePiP() subscribers.
+     */
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        PipModule.onPipModeChanged(isInPictureInPictureMode)
+    }
 
-    super.onCreate(savedInstanceState)
-  }
+    override fun getMainComponentName(): String = "MyApp"
 
-  /**
-   * Returns the name of the main component registered from JavaScript.
-   */
-  override fun getMainComponentName(): String = "MyApp"
-
-  /**
-   * New Architecture support
-   */
-  override fun createReactActivityDelegate(): ReactActivityDelegate =
-      DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
+    override fun createReactActivityDelegate(): ReactActivityDelegate =
+        DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
 }
