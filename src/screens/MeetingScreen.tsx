@@ -1,13 +1,22 @@
 // src/screens/MeetingScreen.tsx
 // Top-level screen — shows LobbyScreen first, then the live meeting room
+//
+// FIXES:
+// 1. Back button → Picture-in-Picture (Android) instead of leaving room
+// 2. Reconnect: use room events (not polling state) to drive connected/loading UI
+// 3. Screen share: threads `remoteScreenShareActive` from RoomView → ControlBar
+// 4. Screen share layout: Google Meet style via updated RoomView
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ActivityIndicator,
   Alert,
+  BackHandler,
+  NativeEventSubscription,
+  Platform,
 } from 'react-native';
 import {
   AudioSession,
@@ -15,7 +24,7 @@ import {
   useLocalParticipant,
   useRoomContext,
 } from '@livekit/react-native';
-import { ConnectionState } from 'livekit-client';
+import { ConnectionState, RoomEvent } from 'livekit-client';
 import { LIVEKIT_CONFIG } from '../config/livekit';
 import NotificationService from '../services/NotificationService';
 import { useBackgroundFilter } from '../hooks/useBackgroundFilter';
@@ -23,6 +32,15 @@ import { RoomView } from '../components/RoomView';
 import { ControlBar } from '../components/ControlBar';
 import { BackgroundFilterPicker } from '../components/BackgroundFilterPicker';
 import LobbyScreen, { JoinOptions } from './LobbyScreen';
+
+// PiP helper — Android only. Silently no-ops on iOS.
+// We use NativeModules so the import works even if the module isn't linked.
+let PictureInPicture: { enterPictureInPictureMode?: () => void } = {};
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { NativeModules } = require('react-native');
+  PictureInPicture = NativeModules.RNAndroidPip ?? {};
+} catch (_) {}
 
 type AppStage = 'lobby' | 'meeting' | 'ended';
 
@@ -43,6 +61,30 @@ export default function MeetingScreen() {
     return () => {
       if (stage === 'meeting') AudioSession.stopAudioSession();
     };
+  }, [stage]);
+
+  // ── Android back button → PiP instead of leaving ──────────────────────────
+  useEffect(() => {
+    if (stage !== 'meeting') return;
+
+    const sub: NativeEventSubscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        if (Platform.OS === 'android') {
+          // Try to enter PiP mode. Falls back to minimise app if PiP not available.
+          if (PictureInPicture.enterPictureInPictureMode) {
+            PictureInPicture.enterPictureInPictureMode();
+          } else {
+            // Minimise the app without leaving the room
+            BackHandler.exitApp();
+          }
+          return true; // Prevent default back behaviour (closing the screen/room)
+        }
+        return false; // iOS: let the system handle it
+      },
+    );
+
+    return () => sub.remove();
   }, [stage]);
 
   const handleJoin = useCallback((options: JoinOptions) => {
@@ -100,23 +142,50 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
   const room = useRoomContext();
   const { localParticipant } = useLocalParticipant();
   const [showFilterPicker, setShowFilterPicker] = useState(false);
+  const [remoteScreenShareActive, setRemoteScreenShareActive] = useState(false);
   const { activeFilter, isApplying, applyFilter } = useBackgroundFilter();
 
-  const connectionState = room?.state;
+  // ── FIX: Use event-driven connection state instead of polling room.state ──
+  // The bug: on reconnect, room.state briefly shows Disconnected before
+  // transitioning to Connecting, causing the UI to flash "ended" or
+  // others to see you while you see a loader forever.
+  //
+  // Solution: track connection state via RoomEvents so we never miss
+  // the transition, and only mark "ended" after we've been truly Connected.
+  const [connState, setConnState] = useState<ConnectionState>(
+    room?.state ?? ConnectionState.Connecting,
+  );
+  const hasEverConnected = useRef(false);
 
-  // FIX: Check connecting FIRST, then connected, then disconnected.
-  // On initial mount the state is Disconnected briefly before the room
-  // transitions to Connecting — we must not treat that as "call ended".
-  const isConnecting =
-    connectionState === ConnectionState.Connecting ||
-    connectionState === ConnectionState.Reconnecting;
-  const isConnected = connectionState === ConnectionState.Connected;
-  const isReconnecting = connectionState === ConnectionState.Reconnecting;
+  useEffect(() => {
+    if (!room) return;
 
-  // Only treat Disconnected as "ended" if we were previously connected.
-  // We track this with a ref so it survives re-renders without causing extra renders.
-  const hasConnectedRef = React.useRef(false);
-  if (isConnected) hasConnectedRef.current = true;
+    const onConnected    = () => { hasEverConnected.current = true; setConnState(ConnectionState.Connected);     };
+    const onReconnecting = () => setConnState(ConnectionState.Reconnecting);
+    const onReconnected  = () => setConnState(ConnectionState.Connected);
+    const onDisconnected = () => setConnState(ConnectionState.Disconnected);
+
+    room.on(RoomEvent.Connected,     onConnected);
+    room.on(RoomEvent.Reconnecting,  onReconnecting);
+    room.on(RoomEvent.Reconnected,   onReconnected);
+    room.on(RoomEvent.Disconnected,  onDisconnected);
+
+    // Sync immediately in case we're already connected when this mounts
+    if (room.state === ConnectionState.Connected) {
+      hasEverConnected.current = true;
+      setConnState(ConnectionState.Connected);
+    }
+
+    return () => {
+      room.off(RoomEvent.Connected,     onConnected);
+      room.off(RoomEvent.Reconnecting,  onReconnecting);
+      room.off(RoomEvent.Reconnected,   onReconnected);
+      room.off(RoomEvent.Disconnected,  onDisconnected);
+    };
+  }, [room]);
+
+  const isConnected    = connState === ConnectionState.Connected;
+  const isReconnecting = connState === ConnectionState.Reconnecting;
 
   const handleEndCall = useCallback(() => {
     Alert.alert('End Meeting', 'Are you sure you want to leave?', [
@@ -133,13 +202,12 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     [applyFilter, localParticipant],
   );
 
-  // FIX: Show loader for Connecting OR the initial Disconnected state
-  // (before we've ever connected). Never flash "ended" on initial render.
+  // ── Show loader while connecting / reconnecting ───────────────────────────
   if (!isConnected) {
-    // If we were previously connected and now disconnected → call ended
+    // If truly disconnected after being connected → call ended
     if (
-      connectionState === ConnectionState.Disconnected &&
-      hasConnectedRef.current
+      connState === ConnectionState.Disconnected &&
+      hasEverConnected.current
     ) {
       return (
         <View style={styles.centered}>
@@ -149,7 +217,6 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
       );
     }
 
-    // Otherwise (connecting, reconnecting, or initial disconnected) → show loader
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#4f46e5" />
@@ -181,7 +248,8 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
       </View>
 
       <View style={styles.videoArea}>
-        <RoomView />
+        {/* RoomView tells us when a remote screen share is active */}
+        <RoomView onScreenShareActive={setRemoteScreenShareActive} />
       </View>
 
       <ControlBar
@@ -189,6 +257,7 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
         onToggleBackgroundFilter={() => setShowFilterPicker(true)}
         activeFilter={activeFilter}
         isApplyingFilter={isApplying}
+        remoteScreenShareActive={remoteScreenShareActive}
       />
 
       <BackgroundFilterPicker

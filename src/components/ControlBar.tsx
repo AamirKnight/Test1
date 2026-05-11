@@ -1,5 +1,7 @@
 // src/components/ControlBar.tsx
 // Bottom control bar: mic, camera, screen share, blur, end call
+// - Screen share button disabled when someone else is already sharing
+// - Exports screen share active state for RoomView
 
 import React, { useState } from 'react';
 import {
@@ -14,13 +16,15 @@ import { useLocalParticipant, useRoomContext } from '@livekit/react-native';
 import { ScreenCapturePickerView } from '@livekit/react-native-webrtc';
 import { Track } from 'livekit-client';
 import { useNetworkQuality } from '../hooks/useNetworkQuality';
-import { BackgroundFilterType, BACKGROUND_FILTERS } from '../hooks/useBackgroundFilter';
+import { BackgroundFilterType } from '../hooks/useBackgroundFilter';
 
 interface ControlBarProps {
   onEndCall: () => void;
   onToggleBackgroundFilter: () => void;
   activeFilter: BackgroundFilterType;
   isApplyingFilter: boolean;
+  /** True when any remote participant is sharing their screen */
+  remoteScreenShareActive?: boolean;
 }
 
 export function ControlBar({
@@ -28,6 +32,7 @@ export function ControlBar({
   onToggleBackgroundFilter,
   activeFilter,
   isApplyingFilter,
+  remoteScreenShareActive = false,
 }: ControlBarProps) {
   const { localParticipant } = useLocalParticipant();
   const room = useRoomContext();
@@ -36,8 +41,8 @@ export function ControlBar({
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [screenShareLoading, setScreenShareLoading] = useState(false);
 
-  const isMicOn = localParticipant?.isMicrophoneEnabled ?? false;
-  const isCameraOn = localParticipant?.isCameraEnabled ?? false;
+  const isMicOn    = localParticipant?.isMicrophoneEnabled ?? false;
+  const isCameraOn = localParticipant?.isCameraEnabled     ?? false;
 
   const toggleMic = async () => {
     await localParticipant?.setMicrophoneEnabled(!isMicOn);
@@ -48,7 +53,10 @@ export function ControlBar({
   };
 
   const toggleScreenShare = async () => {
+    // Don't allow sharing when someone else is already sharing
+    if (remoteScreenShareActive && !isScreenSharing) return;
     if (screenShareLoading) return;
+
     setScreenShareLoading(true);
     try {
       if (isScreenSharing) {
@@ -71,6 +79,21 @@ export function ControlBar({
       await (camPub.track as any).switchCamera?.();
     }
   };
+
+  // Screen share button state
+  const shareDisabled = remoteScreenShareActive && !isScreenSharing;
+  const shareIcon = screenShareLoading
+    ? '⏳'
+    : isScreenSharing
+    ? '🛑'
+    : shareDisabled
+    ? '🚫'
+    : '🖥️';
+  const shareLabel = isScreenSharing
+    ? 'Stop'
+    : shareDisabled
+    ? 'Sharing'
+    : 'Share';
 
   return (
     <View style={styles.container}>
@@ -124,14 +147,15 @@ export function ControlBar({
           variant="default"
         />
 
-        {/* Screen share */}
+        {/* Screen share — disabled when remote is sharing */}
         <ControlButton
           onPress={toggleScreenShare}
-          icon={screenShareLoading ? '⏳' : isScreenSharing ? '🛑' : '🖥️'}
-          label={isScreenSharing ? 'Stop share' : 'Share'}
+          icon={shareIcon}
+          label={shareLabel}
           active={isScreenSharing}
           variant={isScreenSharing ? 'active' : 'default'}
           loading={screenShareLoading}
+          disabled={shareDisabled}
         />
 
         {/* Background filter */}
@@ -169,6 +193,7 @@ interface ControlButtonProps {
   active: boolean;
   variant: 'default' | 'active' | 'danger';
   loading?: boolean;
+  disabled?: boolean;
 }
 
 function ControlButton({
@@ -178,31 +203,45 @@ function ControlButton({
   active,
   variant,
   loading,
+  disabled,
 }: ControlButtonProps) {
-  const bgColor = {
-    default: active ? 'rgba(79,70,229,0.25)' : 'rgba(255,255,255,0.08)',
-    active: 'rgba(79,70,229,0.5)',
-    danger: '#dc2626',
-  }[variant];
+  const bgColor = disabled
+    ? 'rgba(255,255,255,0.03)'
+    : {
+        default: active ? 'rgba(79,70,229,0.25)' : 'rgba(255,255,255,0.08)',
+        active: 'rgba(79,70,229,0.5)',
+        danger: '#dc2626',
+      }[variant];
 
-  const borderColor = {
-    default: active ? '#4f46e5' : 'rgba(255,255,255,0.12)',
-    active: '#6366f1',
-    danger: '#ef4444',
-  }[variant];
+  const borderColor = disabled
+    ? 'rgba(255,255,255,0.05)'
+    : {
+        default: active ? '#4f46e5' : 'rgba(255,255,255,0.12)',
+        active: '#6366f1',
+        danger: '#ef4444',
+      }[variant];
 
   return (
     <TouchableOpacity
-      style={[styles.button, { backgroundColor: bgColor, borderColor }]}
+      style={[
+        styles.button,
+        { backgroundColor: bgColor, borderColor },
+        disabled && styles.buttonDisabled,
+      ]}
       onPress={onPress}
-      activeOpacity={0.7}
+      activeOpacity={disabled ? 1 : 0.7}
+      disabled={disabled || loading}
     >
       {loading ? (
         <ActivityIndicator size="small" color="#fff" />
       ) : (
-        <Text style={styles.buttonIcon}>{icon}</Text>
+        <Text style={[styles.buttonIcon, disabled && styles.buttonIconDisabled]}>
+          {icon}
+        </Text>
       )}
-      <Text style={styles.buttonLabel}>{label}</Text>
+      <Text style={[styles.buttonLabel, disabled && styles.buttonLabelDisabled]}>
+        {label}
+      </Text>
     </TouchableOpacity>
   );
 }
@@ -253,14 +292,23 @@ const styles = StyleSheet.create({
     minWidth: 52,
     gap: 4,
   },
+  buttonDisabled: {
+    opacity: 0.35,
+  },
   buttonIcon: {
     fontSize: 20,
+  },
+  buttonIconDisabled: {
+    opacity: 0.5,
   },
   buttonLabel: {
     color: '#ccc',
     fontSize: 9,
     fontWeight: '600',
     letterSpacing: 0.3,
+  },
+  buttonLabelDisabled: {
+    color: '#555',
   },
   hidden: {
     width: 0,
