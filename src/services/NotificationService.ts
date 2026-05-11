@@ -1,49 +1,161 @@
 // src/services/NotificationService.ts
-// Handles foreground notification when app is backgrounded during a meeting
 
 import notifee, {
   AndroidImportance,
   AndroidVisibility,
+  AuthorizationStatus,
   EventType,
 } from '@notifee/react-native';
-import { AppState, AppStateStatus, NativeEventSubscription } from 'react-native';
+import {
+  AppState,
+  AppStateStatus,
+  NativeEventSubscription,
+  Platform,
+} from 'react-native';
 import { NOTIFICATION_CONFIG } from '../config/livekit';
+
+const TAG = '[NotifSvc]';
+const NOTIF_ID = String(NOTIFICATION_CONFIG.notificationId);
+const CHANNEL_ID = NOTIFICATION_CONFIG.channelId;
 
 class NotificationService {
   private appStateSubscription: NativeEventSubscription | null = null;
+
   private isInMeeting = false;
-  private onReturnCallback: (() => void) | null = null;
+  private channelReady = false;
+  private initPromise: Promise<void> | null = null;
 
-  async initialize() {
-    // Create notification channel (Android)
-    await notifee.createChannel({
-      id: NOTIFICATION_CONFIG.channelId,
-      name: NOTIFICATION_CONFIG.channelName,
-      importance: AndroidImportance.HIGH,
-      visibility: AndroidVisibility.PUBLIC,
-      sound: 'default',
-    });
+  // disconnect callback from MeetingScreen
+  private disconnectCallback: (() => void) | null = null;
 
-    // Handle notification press events (background/quit)
-    notifee.onBackgroundEvent(async ({ type, detail }) => {
-      if (type === EventType.PRESS) {
-        await notifee.cancelNotification(
-          String(NOTIFICATION_CONFIG.notificationId),
+  // current meeting info
+  private roomName = 'Meeting';
+  private participantCount = 1;
+
+  // ─────────────────────────────────────────────────────────────
+  // INITIALIZE
+  // ─────────────────────────────────────────────────────────────
+
+  initialize(): Promise<void> {
+    if (this.initPromise) return this.initPromise;
+
+    this.initPromise = (async () => {
+      console.log(TAG, 'initialize() start');
+
+      try {
+        const settings = await notifee.requestPermission();
+
+        console.log(
+          TAG,
+          'permission authorizationStatus =',
+          settings.authorizationStatus,
         );
-      }
-    });
 
-    // Handle notification press events (foreground)
-    notifee.onForegroundEvent(({ type, detail }) => {
-      if (type === EventType.PRESS) {
-        this.onReturnCallback?.();
+        if (
+          settings.authorizationStatus !== AuthorizationStatus.AUTHORIZED &&
+          settings.authorizationStatus !== AuthorizationStatus.PROVISIONAL
+        ) {
+          console.warn(TAG, 'Notification permission NOT granted');
+        }
+      } catch (e) {
+        console.warn(TAG, 'requestPermission threw', e);
       }
-    });
+
+      if (Platform.OS === 'android') {
+        try {
+          const id = await notifee.createChannel({
+            id: CHANNEL_ID,
+            name: NOTIFICATION_CONFIG.channelName,
+            importance: AndroidImportance.HIGH,
+            visibility: AndroidVisibility.PUBLIC,
+            vibration: false,
+            sound: undefined,
+          });
+
+          console.log(TAG, 'createChannel resolved with id =', id);
+
+          this.channelReady = true;
+        } catch (e) {
+          console.warn(TAG, 'createChannel failed', e);
+        }
+      } else {
+        this.channelReady = true;
+      }
+
+      // background action handling
+      notifee.onBackgroundEvent(async ({ type, detail }) => {
+        console.log(TAG, 'onBackgroundEvent', type);
+
+        if (type === EventType.ACTION_PRESS) {
+          const actionId = detail.pressAction?.id;
+
+          console.log(TAG, 'background action =', actionId);
+
+          if (actionId === 'end-call') {
+            this.disconnectCallback?.();
+
+            await this.stopMeetingTracking();
+          }
+        }
+
+        if (type === EventType.PRESS) {
+          await notifee.cancelNotification(NOTIF_ID).catch(() => {});
+        }
+      });
+
+      // foreground action handling
+      notifee.onForegroundEvent(async ({ type, detail }) => {
+        console.log(TAG, 'onForegroundEvent', type);
+
+        if (type === EventType.ACTION_PRESS) {
+          const actionId = detail.pressAction?.id;
+
+          console.log(TAG, 'foreground action =', actionId);
+
+          if (actionId === 'end-call') {
+            this.disconnectCallback?.();
+
+            await this.stopMeetingTracking();
+          }
+        }
+
+        if (type === EventType.PRESS) {
+          await this.cancelNotification();
+        }
+      });
+
+      console.log(TAG, 'initialize() complete');
+    })();
+
+    return this.initPromise;
   }
 
-  startMeetingTracking(onReturn?: () => void) {
+  // ─────────────────────────────────────────────────────────────
+  // START TRACKING
+  // ─────────────────────────────────────────────────────────────
+
+  startMeetingTracking(
+    disconnectCallback?: () => void,
+    options?: {
+      roomName?: string;
+      participantCount?: number;
+    },
+  ) {
+    console.log(TAG, 'startMeetingTracking()');
+
     this.isInMeeting = true;
-    this.onReturnCallback = onReturn ?? null;
+
+    this.disconnectCallback = disconnectCallback ?? null;
+
+    if (options?.roomName) {
+      this.roomName = options.roomName;
+    }
+
+    if (typeof options?.participantCount === 'number') {
+      this.participantCount = options.participantCount;
+    }
+
+    this.appStateSubscription?.remove();
 
     this.appStateSubscription = AppState.addEventListener(
       'change',
@@ -51,51 +163,149 @@ class NotificationService {
     );
   }
 
-  stopMeetingTracking() {
-    this.isInMeeting = false;
-    this.appStateSubscription?.remove();
-    this.appStateSubscription = null;
-    this.cancelNotification();
+  // ─────────────────────────────────────────────────────────────
+  // UPDATE LIVE INFO
+  // ─────────────────────────────────────────────────────────────
+
+  async updateMeetingInfo(options: {
+    roomName?: string;
+    participantCount?: number;
+  }) {
+    if (options.roomName) {
+      this.roomName = options.roomName;
+    }
+
+    if (typeof options.participantCount === 'number') {
+      this.participantCount = options.participantCount;
+    }
+
+    // update active notification if already visible
+    if (this.isInMeeting) {
+      await this._display();
+    }
   }
 
-  private handleAppStateChange = async (nextState: AppStateStatus) => {
+  // ─────────────────────────────────────────────────────────────
+  // STOP TRACKING
+  // ─────────────────────────────────────────────────────────────
+
+  async stopMeetingTracking() {
+    console.log(TAG, 'stopMeetingTracking()');
+
+    this.isInMeeting = false;
+
+    this.disconnectCallback = null;
+
+    this.appStateSubscription?.remove();
+    this.appStateSubscription = null;
+
+    await this.cancelNotification();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // SHOW NOTIFICATION
+  // ─────────────────────────────────────────────────────────────
+
+  showPersistentNotification() {
+    console.log(TAG, 'showPersistentNotification()');
+
+    (async () => {
+      if (!this.channelReady) {
+        await this.initialize();
+      }
+
+      await this._display();
+    })().catch((e) => {
+      console.warn(TAG, 'showPersistentNotification error', e);
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // CANCEL
+  // ─────────────────────────────────────────────────────────────
+
+  async cancelNotification() {
+    try {
+      await notifee.cancelNotification(NOTIF_ID);
+    } catch (e) {
+      console.warn(TAG, 'cancelNotification error', e);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // APP STATE
+  // ─────────────────────────────────────────────────────────────
+
+  private handleAppStateChange = (nextState: AppStateStatus) => {
+    console.log(TAG, 'AppState →', nextState);
+
     if (!this.isInMeeting) return;
 
     if (nextState === 'background' || nextState === 'inactive') {
-      await this.showMeetingNotification();
+      this.showPersistentNotification();
     } else if (nextState === 'active') {
-      await this.cancelNotification();
+      this.cancelNotification();
     }
   };
 
-  private async showMeetingNotification() {
+  // ─────────────────────────────────────────────────────────────
+  // DISPLAY
+  // ─────────────────────────────────────────────────────────────
+
+  private async _display() {
     try {
+      const participantText =
+        this.participantCount === 1
+          ? '1 participant'
+          : `${this.participantCount} participants`;
+
       await notifee.displayNotification({
-        id: String(NOTIFICATION_CONFIG.notificationId),
-        title: `🎥 ${NOTIFICATION_CONFIG.title}`,
-        body: NOTIFICATION_CONFIG.body,
+        id: NOTIF_ID,
+
+        title: `🎥 ${this.roomName}`,
+
+        body: `${participantText} • Meeting in progress`,
+
         android: {
-          channelId: NOTIFICATION_CONFIG.channelId,
+          channelId: CHANNEL_ID,
+
           importance: AndroidImportance.HIGH,
+
           visibility: AndroidVisibility.PUBLIC,
+
           ongoing: true,
-          pressAction: { id: 'return-to-meeting', launchActivity: 'default' },
+
+          onlyAlertOnce: true,
+
+          showTimestamp: true,
+
+          timestamp: Date.now(),
+
+          pressAction: {
+            id: 'default',
+            launchActivity: 'default',
+          },
+
           actions: [
             {
               title: 'Return',
-              pressAction: { id: 'return-to-meeting', launchActivity: 'default' },
+              pressAction: {
+                id: 'default',
+                launchActivity: 'default',
+              },
             },
             {
               title: 'End Call',
-              pressAction: { id: 'end-call' },
+              pressAction: {
+                id: 'end-call',
+              },
             },
           ],
+
           color: '#4f46e5',
-          smallIcon: 'ic_notification', // must be in android drawables
-          largeIcon: 'ic_launcher',
         },
+
         ios: {
-          categoryId: 'meeting',
           foregroundPresentationOptions: {
             badge: true,
             sound: false,
@@ -104,24 +314,11 @@ class NotificationService {
           },
         },
       });
+
+      console.log(TAG, '_display() success');
     } catch (e) {
-      // notifee not available or permissions denied — fail silently
-      console.warn('NotificationService: could not display notification', e);
+      console.warn(TAG, '_display() FAILED', e);
     }
-  }
-
-  async cancelNotification() {
-    try {
-      await notifee.cancelNotification(
-        String(NOTIFICATION_CONFIG.notificationId),
-      );
-    } catch (_) {}
-  }
-
-  async requestPermissions() {
-    try {
-      await notifee.requestPermission();
-    } catch (_) {}
   }
 }
 

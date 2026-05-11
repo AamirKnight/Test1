@@ -1,11 +1,4 @@
 // src/screens/MeetingScreen.tsx
-// Top-level screen — shows LobbyScreen first, then the live meeting room
-//
-// FIXES:
-// 1. Back button → Picture-in-Picture (Android) instead of leaving room
-// 2. Reconnect: use room events (not polling state) to drive connected/loading UI
-// 3. Screen share: threads `remoteScreenShareActive` from RoomView → ControlBar
-// 4. Screen share layout: Google Meet style via updated RoomView
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -33,11 +26,10 @@ import { ControlBar } from '../components/ControlBar';
 import { BackgroundFilterPicker } from '../components/BackgroundFilterPicker';
 import LobbyScreen, { JoinOptions } from './LobbyScreen';
 
-// PiP helper — Android only. Silently no-ops on iOS.
-// We use NativeModules so the import works even if the module isn't linked.
+const TAG = '[MeetingScreen]';
+
 let PictureInPicture: { enterPictureInPictureMode?: () => void } = {};
 try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { NativeModules } = require('react-native');
   PictureInPicture = NativeModules.RNAndroidPip ?? {};
 } catch (_) {}
@@ -51,36 +43,38 @@ export default function MeetingScreen() {
     micEnabled: true,
   });
 
+  // Initialize notification channel as early as possible
   useEffect(() => {
-    if (stage === 'meeting') {
-      AudioSession.startAudioSession();
-      NotificationService.initialize().then(() =>
-        NotificationService.requestPermissions(),
-      );
-    }
-    return () => {
-      if (stage === 'meeting') AudioSession.stopAudioSession();
-    };
+    console.log(TAG, 'mount — initializing NotificationService');
+    NotificationService.initialize().catch((e) =>
+      console.warn(TAG, 'NotificationService.initialize() failed', e),
+    );
+  }, []);
+
+  useEffect(() => {
+    if (stage === 'meeting') AudioSession.startAudioSession();
+    return () => { if (stage === 'meeting') AudioSession.stopAudioSession(); };
   }, [stage]);
 
-  // ── Android back button → PiP instead of leaving ──────────────────────────
+  // Back button: show notification instantly then minimise
   useEffect(() => {
     if (stage !== 'meeting') return;
+    console.log(TAG, 'registering BackHandler');
 
     const sub: NativeEventSubscription = BackHandler.addEventListener(
       'hardwareBackPress',
       () => {
         if (Platform.OS === 'android') {
-          // Try to enter PiP mode. Falls back to minimise app if PiP not available.
+          console.log(TAG, 'back pressed — showing notification');
+          NotificationService.showPersistentNotification();
           if (PictureInPicture.enterPictureInPictureMode) {
             PictureInPicture.enterPictureInPictureMode();
           } else {
-            // Minimise the app without leaving the room
             BackHandler.exitApp();
           }
-          return true; // Prevent default back behaviour (closing the screen/room)
+          return true;
         }
-        return false; // iOS: let the system handle it
+        return false;
       },
     );
 
@@ -98,13 +92,7 @@ export default function MeetingScreen() {
   }, []);
 
   if (stage === 'lobby') {
-    return (
-      <LobbyScreen
-        roomName={LIVEKIT_CONFIG.roomName}
-        displayName="You"
-        onJoin={handleJoin}
-      />
-    );
+    return <LobbyScreen roomName={LIVEKIT_CONFIG.roomName} displayName="You" onJoin={handleJoin} />;
   }
 
   if (stage === 'ended') {
@@ -124,19 +112,13 @@ export default function MeetingScreen() {
       connect
       audio={joinOptions.micEnabled}
       video={joinOptions.cameraEnabled}
-      options={{
-        adaptiveStream: { pixelDensity: 'screen' },
-        dynacast: true,
-      }}
-      onConnected={() => NotificationService.startMeetingTracking()}
+      options={{ adaptiveStream: { pixelDensity: 'screen' }, dynacast: true }}
       onDisconnected={handleEnded}
     >
       <RoomContent onEndCall={handleEnded} />
     </LiveKitRoom>
   );
 }
-
-// ── Inner component so it can use LiveKit hooks ───────────────────────────────
 
 function RoomContent({ onEndCall }: { onEndCall: () => void }) {
   const room = useRoomContext();
@@ -145,42 +127,52 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
   const [remoteScreenShareActive, setRemoteScreenShareActive] = useState(false);
   const { activeFilter, isApplying, applyFilter } = useBackgroundFilter();
 
-  // ── FIX: Use event-driven connection state instead of polling room.state ──
-  // The bug: on reconnect, room.state briefly shows Disconnected before
-  // transitioning to Connecting, causing the UI to flash "ended" or
-  // others to see you while you see a loader forever.
-  //
-  // Solution: track connection state via RoomEvents so we never miss
-  // the transition, and only mark "ended" after we've been truly Connected.
   const [connState, setConnState] = useState<ConnectionState>(
     room?.state ?? ConnectionState.Connecting,
   );
   const hasEverConnected = useRef(false);
 
+  // Stable ref to disconnect so the notification "End Call" action can call it
+  // even when the app is in the background (callback stored in NotificationService)
+  const disconnectRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    disconnectRef.current = () => {
+      console.log(TAG, 'disconnectRef called — disconnecting room');
+      room?.disconnect();
+    };
+  }, [room]);
+
   useEffect(() => {
     if (!room) return;
 
-    const onConnected    = () => { hasEverConnected.current = true; setConnState(ConnectionState.Connected);     };
-    const onReconnecting = () => setConnState(ConnectionState.Reconnecting);
-    const onReconnected  = () => setConnState(ConnectionState.Connected);
-    const onDisconnected = () => setConnState(ConnectionState.Disconnected);
-
-    room.on(RoomEvent.Connected,     onConnected);
-    room.on(RoomEvent.Reconnecting,  onReconnecting);
-    room.on(RoomEvent.Reconnected,   onReconnected);
-    room.on(RoomEvent.Disconnected,  onDisconnected);
-
-    // Sync immediately in case we're already connected when this mounts
-    if (room.state === ConnectionState.Connected) {
+    const onConnected = () => {
+      console.log(TAG, 'RoomEvent.Connected');
       hasEverConnected.current = true;
       setConnState(ConnectionState.Connected);
+      // Pass disconnect callback so the notification "End Call" action works
+      NotificationService.startMeetingTracking(() => disconnectRef.current());
+    };
+    const onReconnecting = () => { console.log(TAG, 'Reconnecting'); setConnState(ConnectionState.Reconnecting); };
+    const onReconnected  = () => { console.log(TAG, 'Reconnected');  setConnState(ConnectionState.Connected); };
+    const onDisconnected = () => { console.log(TAG, 'Disconnected'); setConnState(ConnectionState.Disconnected); };
+
+    room.on(RoomEvent.Connected,    onConnected);
+    room.on(RoomEvent.Reconnecting, onReconnecting);
+    room.on(RoomEvent.Reconnected,  onReconnected);
+    room.on(RoomEvent.Disconnected, onDisconnected);
+
+    if (room.state === ConnectionState.Connected) {
+      console.log(TAG, 'already connected on mount');
+      hasEverConnected.current = true;
+      setConnState(ConnectionState.Connected);
+      NotificationService.startMeetingTracking(() => disconnectRef.current());
     }
 
     return () => {
-      room.off(RoomEvent.Connected,     onConnected);
-      room.off(RoomEvent.Reconnecting,  onReconnecting);
-      room.off(RoomEvent.Reconnected,   onReconnected);
-      room.off(RoomEvent.Disconnected,  onDisconnected);
+      room.off(RoomEvent.Connected,    onConnected);
+      room.off(RoomEvent.Reconnecting, onReconnecting);
+      room.off(RoomEvent.Reconnected,  onReconnected);
+      room.off(RoomEvent.Disconnected, onDisconnected);
     };
   }, [room]);
 
@@ -190,7 +182,14 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
   const handleEndCall = useCallback(() => {
     Alert.alert('End Meeting', 'Are you sure you want to leave?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Leave', style: 'destructive', onPress: () => room?.disconnect() },
+      {
+        text: 'Leave',
+        style: 'destructive',
+        onPress: () => {
+          NotificationService.cancelNotification();
+          room?.disconnect();
+        },
+      },
     ]);
   }, [room]);
 
@@ -202,13 +201,8 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     [applyFilter, localParticipant],
   );
 
-  // ── Show loader while connecting / reconnecting ───────────────────────────
   if (!isConnected) {
-    // If truly disconnected after being connected → call ended
-    if (
-      connState === ConnectionState.Disconnected &&
-      hasEverConnected.current
-    ) {
+    if (connState === ConnectionState.Disconnected && hasEverConnected.current) {
       return (
         <View style={styles.centered}>
           <Text style={styles.endIcon}>👋</Text>
@@ -216,7 +210,6 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
         </View>
       );
     }
-
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#4f46e5" />
@@ -235,7 +228,6 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
           <Text style={styles.reconnectText}>Reconnecting…</Text>
         </View>
       )}
-
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <View style={styles.liveDot} />
@@ -246,12 +238,9 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
           {(room?.numParticipants ?? 1) !== 1 ? 's' : ''}
         </Text>
       </View>
-
       <View style={styles.videoArea}>
-        {/* RoomView tells us when a remote screen share is active */}
         <RoomView onScreenShareActive={setRemoteScreenShareActive} />
       </View>
-
       <ControlBar
         onEndCall={handleEndCall}
         onToggleBackgroundFilter={() => setShowFilterPicker(true)}
@@ -259,7 +248,6 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
         isApplyingFilter={isApplying}
         remoteScreenShareActive={remoteScreenShareActive}
       />
-
       <BackgroundFilterPicker
         visible={showFilterPicker}
         activeFilter={activeFilter}
@@ -272,69 +260,18 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
 }
 
 const styles = StyleSheet.create({
-  centered: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#080810',
-    gap: 14,
-    padding: 32,
-  },
-  loadingText: {
-    color: '#9ca3af',
-    fontSize: 16,
-    fontWeight: '500',
-  },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#080810', gap: 14, padding: 32 },
+  loadingText: { color: '#9ca3af', fontSize: 16, fontWeight: '500' },
   endIcon: { fontSize: 48 },
   endTitle: { color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center' },
   endBody: { color: '#9ca3af', fontSize: 14, textAlign: 'center', lineHeight: 22 },
-  roomContainer: {
-    flex: 1,
-    backgroundColor: '#080810',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(79,70,229,0.15)',
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  liveDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#22c55e',
-  },
-  headerTitle: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  headerParticipants: {
-    color: '#6b7280',
-    fontSize: 13,
-  },
+  roomContainer: { flex: 1, backgroundColor: '#080810' },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: 'rgba(79,70,229,0.15)' },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#22c55e' },
+  headerTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  headerParticipants: { color: '#6b7280', fontSize: 13 },
   videoArea: { flex: 1 },
-  reconnectBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(245,158,11,0.15)',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(245,158,11,0.3)',
-    paddingVertical: 6,
-    gap: 8,
-  },
-  reconnectText: {
-    color: '#f59e0b',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  reconnectBanner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(245,158,11,0.15)', borderBottomWidth: 1, borderBottomColor: 'rgba(245,158,11,0.3)', paddingVertical: 6, gap: 8 },
+  reconnectText: { color: '#f59e0b', fontSize: 13, fontWeight: '600' },
 });
