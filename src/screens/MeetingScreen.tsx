@@ -1,16 +1,19 @@
 // src/screens/MeetingScreen.tsx
 //
-// CHANGES vs previous version:
-//  1. PiP mode: uses react-native-pip-android (PipHandler + usePipModeListener)
-//     - Back button → PipHandler.enterPipMode(9, 16) instead of exitApp()
-//     - PipHandler.setMeetingScreenState(true/false) controls auto-PiP
-//     - When inPipMode === true, a minimal PiP UI is rendered (just the video grid)
-//  2. Notification guard: startMeetingTracking() is called ONLY after room is
-//     Connected; stopMeetingTracking() is called on every disconnect/leave path.
-//  3. Removed the broken NativeModules.RNAndroidPip attempt.
+// PiP: uses our OWN PipModule.kt native module via the usePiP() hook.
+// DO NOT import react-native-pip-android — that package has its own native
+// module and conflicts with PipModule.kt. Remove it from package.json:
+//   yarn remove react-native-pip-android
 //
-// Install: yarn add react-native-pip-android
-// Then follow the MainActivity.kt change (onPictureInPictureModeChanged).
+// PiP flow:
+//   - Back button while in meeting → enterPip() → Android PiP window
+//   - PipModule fires "onPipModeChanged" event → usePiP sets inPipMode
+//   - When inPipMode === true → minimal PiP UI (video only, no controls)
+//
+// Notification flow:
+//   - startMeetingTracking() called ONLY after LiveKit room is Connected
+//   - stopMeetingTracking() called on EVERY disconnect/leave path
+//   - _isInMeeting guard in NotificationService prevents stray notifications
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -38,9 +41,8 @@ import { ControlBar } from '../components/ControlBar';
 import { BackgroundFilterPicker } from '../components/BackgroundFilterPicker';
 import LobbyScreen, { JoinOptions } from './LobbyScreen';
 
-// react-native-pip-android — install with: yarn add react-native-pip-android
-// On Android only; safe to import everywhere (no-ops on iOS).
-import PipHandler, { usePipModeListener } from 'react-native-pip-android';
+// ✅ Our OWN hook — talks to PipModule.kt directly via NativeModules
+import { usePiP } from '../hooks/usePip';
 
 const TAG = '[MeetingScreen]';
 
@@ -57,7 +59,6 @@ export default function MeetingScreen() {
     micEnabled: true,
   });
 
-  // Initialize notification channel once on mount (no meeting active yet)
   useEffect(() => {
     console.log(TAG, 'mount — initializing NotificationService');
     NotificationService.initialize().catch((e) =>
@@ -67,53 +68,14 @@ export default function MeetingScreen() {
 
   // Audio session: start only while in meeting
   useEffect(() => {
-    if (stage === 'meeting') AudioSession.startAudioSession();
-    return () => {
-      if (stage === 'meeting') AudioSession.stopAudioSession();
-    };
-  }, [stage]);
-
-  // ── PiP: tell the library whether we're on the meeting screen ──
-  // setMeetingScreenState(true)  → auto-PiP when user presses Home
-  // setMeetingScreenState(false) → disable auto-PiP everywhere else
-  useEffect(() => {
-    if (Platform.OS !== 'android') return;
-
     if (stage === 'meeting') {
-      PipHandler.setMeetingScreenState(true);
-      // Set a portrait-friendly 9:16 ratio (width × height in rational units)
-      PipHandler.setDefaultPipDimensions(9, 16);
-    } else {
-      PipHandler.setMeetingScreenState(false);
+      AudioSession.startAudioSession();
     }
-
     return () => {
-      // Always disable when leaving the meeting screen
-      if (Platform.OS === 'android') {
-        PipHandler.setMeetingScreenState(false);
+      if (stage === 'meeting') {
+        AudioSession.stopAudioSession();
       }
     };
-  }, [stage]);
-
-  // ── Back button: enter PiP instead of exiting ──
-  // Only active when inside a meeting; lobby/ended use default back behaviour.
-  useEffect(() => {
-    if (stage !== 'meeting' || Platform.OS !== 'android') return;
-    console.log(TAG, 'registering BackHandler → PiP');
-
-    const sub: NativeEventSubscription = BackHandler.addEventListener(
-      'hardwareBackPress',
-      () => {
-        console.log(TAG, 'back pressed — entering PiP (9×16)');
-        // Show the persistent notification so the user can return or end the call
-        NotificationService.showPersistentNotification();
-        // Enter PiP: width=9 height=16 (portrait) — adjust to 16,9 for landscape
-        PipHandler.enterPipMode(9, 16);
-        return true; // prevent default back navigation
-      },
-    );
-
-    return () => sub.remove();
   }, [stage]);
 
   const handleJoin = useCallback((options: JoinOptions) => {
@@ -123,12 +85,7 @@ export default function MeetingScreen() {
 
   const handleEnded = useCallback(() => {
     setStage('ended');
-    // Ensure notification is removed and tracking stops when meeting ends
     NotificationService.stopMeetingTracking();
-    // Disable auto-PiP
-    if (Platform.OS === 'android') {
-      PipHandler.setMeetingScreenState(false);
-    }
   }, []);
 
   if (stage === 'lobby') {
@@ -182,10 +139,16 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
   );
   const hasEverConnected = useRef(false);
 
-  // ── PiP mode listener ──
-  // usePipModeListener() returns true when the activity enters PiP mode.
-  // On iOS it always returns false (no-op).
-  const inPipMode = usePipModeListener();
+  // ✅ Use OUR OWN usePiP hook (talks to PipModule.kt via NativeModules)
+  // inPipMode    → true when Android has put us in the PiP window
+  // isPipSupported → false on API < 26 or unsupported device
+  // enterPip()   → calls PipModule.enterPipMode(9, 16)
+  const { inPipMode, isPipSupported, enterPip } = usePiP();
+
+  // Debug: log PiP support on mount
+  useEffect(() => {
+    console.log(TAG, 'PiP supported:', isPipSupported);
+  }, [isPipSupported]);
 
   // Stable ref so notification "End Call" action can call disconnect
   const disconnectRef = useRef<() => void>(() => {});
@@ -196,6 +159,7 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     };
   }, [room]);
 
+  // ── Room event listeners ──────────────────────────────────────────────────
   useEffect(() => {
     if (!room) return;
 
@@ -203,7 +167,7 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
       console.log(TAG, 'RoomEvent.Connected');
       hasEverConnected.current = true;
       setConnState(ConnectionState.Connected);
-      // START notification tracking ONLY when the room is actually connected
+      // ✅ START notification tracking ONLY when room is actually Connected
       NotificationService.startMeetingTracking(() => disconnectRef.current(), {
         roomName: LIVEKIT_CONFIG.roomName,
         participantCount: room.numParticipants,
@@ -223,7 +187,7 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     const onDisconnected = () => {
       console.log(TAG, 'Disconnected');
       setConnState(ConnectionState.Disconnected);
-      // STOP notification tracking immediately when room disconnects
+      // ✅ STOP notification tracking immediately when room disconnects
       NotificationService.stopMeetingTracking();
     };
 
@@ -250,6 +214,48 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
       room.off(RoomEvent.Disconnected, onDisconnected);
     };
   }, [room]);
+
+  // ── Back button: enter PiP instead of navigating back ────────────────────
+  // Only when we are connected AND PiP is supported on this device.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    if (connState !== ConnectionState.Connected) return;
+
+    console.log(TAG, 'registering BackHandler → PiP (supported:', isPipSupported, ')');
+
+    const sub: NativeEventSubscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        if (isPipSupported) {
+          console.log(TAG, 'back pressed — entering PiP');
+          // Show persistent notification so user can return or end call from shade
+          NotificationService.showPersistentNotification();
+          // ✅ Enter PiP using OUR native module: portrait 9:16
+          enterPip(9, 16);
+        } else {
+          console.log(TAG, 'back pressed — PiP not supported, showing alert');
+          // Fallback: ask user if they want to leave
+          Alert.alert('Leave Meeting?', 'PiP is not supported on this device.', [
+            { text: 'Stay', style: 'cancel' },
+            {
+              text: 'Leave',
+              style: 'destructive',
+              onPress: () => {
+                NotificationService.stopMeetingTracking();
+                room?.disconnect();
+              },
+            },
+          ]);
+        }
+        return true; // always consume back event
+      },
+    );
+
+    return () => {
+      console.log(TAG, 'removing BackHandler');
+      sub.remove();
+    };
+  }, [connState, isPipSupported, enterPip, room]);
 
   const isConnected    = connState === ConnectionState.Connected;
   const isReconnecting = connState === ConnectionState.Reconnecting;
@@ -278,8 +284,8 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
   );
 
   // ── PiP UI ──────────────────────────────────────────────────────────────
-  // When in PiP mode, render only the video grid — no controls, no header.
-  // The tiny window (~100×160dp) has no room for buttons.
+  // When in PiP mode, render ONLY the video grid — no controls, no header.
+  // The tiny PiP window (~100×160dp) has no room for buttons.
   if (inPipMode && Platform.OS === 'android') {
     return (
       <View style={styles.pipContainer}>
@@ -288,7 +294,7 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     );
   }
 
-  // ── Loading / disconnected ───────────────────────────────────────────────
+  // ── Loading / connecting ─────────────────────────────────────────────────
   if (!isConnected) {
     if (connState === ConnectionState.Disconnected && hasEverConnected.current) {
       return (
@@ -404,7 +410,7 @@ const styles = StyleSheet.create({
   },
   reconnectText: { color: '#f59e0b', fontSize: 13, fontWeight: '600' },
 
-  // PiP: fill the tiny window with just the video — no chrome
+  // PiP: fill the tiny window with only the video — no chrome
   pipContainer: {
     flex: 1,
     backgroundColor: '#000',

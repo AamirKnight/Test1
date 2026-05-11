@@ -1,0 +1,22 @@
+// android/app/src/main/java/com/myapp/pip/PipPackage.kt
+//
+// Registers PipModule with React Native's package system.
+// This file MUST exist — without it, NativeModules.PipModule will be undefined in JS.
+
+package com.myapp.pip
+
+import com.facebook.react.ReactPackage
+import com.facebook.react.bridge.NativeModule
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.uimanager.ViewManager
+
+class PipPackage : ReactPackage {
+
+    override fun createNativeModules(
+        reactContext: ReactApplicationContext,
+    ): List<NativeModule> = listOf(PipModule(reactContext))
+
+    override fun createViewManagers(
+        reactContext: ReactApplicationContext,
+    ): List<ViewManager<*, *>> = emptyList()
+}
