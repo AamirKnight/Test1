@@ -6,7 +6,7 @@ export const LIVEKIT_CONFIG = {
   apiKey: 'API6FHAungZBBxz',
   // Token is pre-generated for testing — in production, fetch from your backend
   token:
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NzgzMDcyMzEsImlkZW50aXR5IjoidGVzdC11c2VyMSIsImlzcyI6IkFQSTZGSEF1bmdaQkJ4eiIsIm5hbWUiOiJ0ZXN0LXVzZXIxIiwibmJmIjoxNzc4MjIwODMxLCJzdWIiOiJ0ZXN0LXVzZXIxIiwidmlkZW8iOnsicm9vbSI6Imhpby10ZXN0LXJvb20iLCJyb29tSm9pbiI6dHJ1ZX19.BTwJEdVnpoenFSXIK7SNSzyfhgQEepKxvDlxP2rMC88',
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3Nzg1NjQ5NjcsImlkZW50aXR5IjoidGVzdC11c2VyMSIsImlzcyI6IkFQSTZGSEF1bmdaQkJ4eiIsIm5hbWUiOiJ0ZXN0LXVzZXIxIiwibmJmIjoxNzc4NDc4NTY3LCJzdWIiOiJ0ZXN0LXVzZXIxIiwidmlkZW8iOnsicm9vbSI6Imhpby10ZXN0LXJvb20iLCJyb29tSm9pbiI6dHJ1ZX19.40DjZZvpNwGzGr8--OF6jvzN7xADMLYI-DK1dHU6_q4',
   roomName: 'hio-test-room',
 };
 

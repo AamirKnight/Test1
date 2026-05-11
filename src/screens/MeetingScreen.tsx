@@ -33,7 +33,6 @@ export default function MeetingScreen() {
     micEnabled: true,
   });
 
-  // Start audio session when entering the meeting
   useEffect(() => {
     if (stage === 'meeting') {
       AudioSession.startAudioSession();
@@ -56,7 +55,6 @@ export default function MeetingScreen() {
     NotificationService.stopMeetingTracking();
   }, []);
 
-  // ── Lobby ──
   if (stage === 'lobby') {
     return (
       <LobbyScreen
@@ -67,7 +65,6 @@ export default function MeetingScreen() {
     );
   }
 
-  // ── Ended ──
   if (stage === 'ended') {
     return (
       <View style={styles.centered}>
@@ -78,7 +75,6 @@ export default function MeetingScreen() {
     );
   }
 
-  // ── Live meeting ──
   return (
     <LiveKitRoom
       serverUrl={LIVEKIT_CONFIG.url}
@@ -107,11 +103,20 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
   const { activeFilter, isApplying, applyFilter } = useBackgroundFilter();
 
   const connectionState = room?.state;
+
+  // FIX: Check connecting FIRST, then connected, then disconnected.
+  // On initial mount the state is Disconnected briefly before the room
+  // transitions to Connecting — we must not treat that as "call ended".
   const isConnecting =
     connectionState === ConnectionState.Connecting ||
     connectionState === ConnectionState.Reconnecting;
   const isConnected = connectionState === ConnectionState.Connected;
   const isReconnecting = connectionState === ConnectionState.Reconnecting;
+
+  // Only treat Disconnected as "ended" if we were previously connected.
+  // We track this with a ref so it survives re-renders without causing extra renders.
+  const hasConnectedRef = React.useRef(false);
+  if (isConnected) hasConnectedRef.current = true;
 
   const handleEndCall = useCallback(() => {
     Alert.alert('End Meeting', 'Are you sure you want to leave?', [
@@ -128,22 +133,29 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     [applyFilter, localParticipant],
   );
 
-  if (!isConnected && isConnecting) {
+  // FIX: Show loader for Connecting OR the initial Disconnected state
+  // (before we've ever connected). Never flash "ended" on initial render.
+  if (!isConnected) {
+    // If we were previously connected and now disconnected → call ended
+    if (
+      connectionState === ConnectionState.Disconnected &&
+      hasConnectedRef.current
+    ) {
+      return (
+        <View style={styles.centered}>
+          <Text style={styles.endIcon}>👋</Text>
+          <Text style={styles.endTitle}>Meeting Ended</Text>
+        </View>
+      );
+    }
+
+    // Otherwise (connecting, reconnecting, or initial disconnected) → show loader
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#4f46e5" />
         <Text style={styles.loadingText}>
           {isReconnecting ? 'Reconnecting…' : 'Joining meeting…'}
         </Text>
-      </View>
-    );
-  }
-
-  if (connectionState === ConnectionState.Disconnected) {
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.endIcon}>👋</Text>
-        <Text style={styles.endTitle}>Meeting Ended</Text>
       </View>
     );
   }
@@ -189,8 +201,6 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     </View>
   );
 }
-
-// ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   centered: {

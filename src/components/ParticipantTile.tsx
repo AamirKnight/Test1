@@ -1,5 +1,7 @@
 // src/components/ParticipantTile.tsx
 // Renders a single participant's video/audio tile
+// - Camera tracks: objectFit="cover" (fills the tile)
+// - Screen share tracks: objectFit="contain" (full screen visible, no crop)
 
 import React, { useMemo } from 'react';
 import {
@@ -26,6 +28,7 @@ export function ParticipantTile({ trackRef, style, onPress }: ParticipantTilePro
   const isVideoOn = isTrackReference(trackRef) && !trackRef.publication?.isMuted;
   const isMicMuted = participant.isMicrophoneEnabled === false;
   const isLocal = participant.isLocal;
+  const isScreenShare = trackRef.source === Track.Source.ScreenShare;
 
   const initials = useMemo(() => {
     const name = participant.name ?? participant.identity ?? '?';
@@ -38,7 +41,7 @@ export function ParticipantTile({ trackRef, style, onPress }: ParticipantTilePro
 
   return (
     <TouchableOpacity
-      style={[styles.tile, style]}
+      style={[styles.tile, isScreenShare && styles.tileScreenShare, style]}
       onPress={onPress}
       activeOpacity={0.9}
     >
@@ -46,8 +49,10 @@ export function ParticipantTile({ trackRef, style, onPress }: ParticipantTilePro
         <VideoTrack
           trackRef={trackRef}
           style={styles.video}
-          objectFit="cover"
-          mirror={isLocal && trackRef.source === Track.Source.Camera}
+          // Screen shares use "contain" so the full screen is always visible
+          // Camera tiles use "cover" to fill the tile nicely
+          objectFit={isScreenShare ? 'contain' : 'cover'}
+          mirror={isLocal && !isScreenShare && trackRef.source === Track.Source.Camera}
         />
       ) : (
         <View style={styles.avatarContainer}>
@@ -57,17 +62,26 @@ export function ParticipantTile({ trackRef, style, onPress }: ParticipantTilePro
         </View>
       )}
 
-      {/* Name badge */}
-      <View style={styles.nameBadge}>
-        {isMicMuted && <Text style={styles.muteIcon}>🔇</Text>}
-        <Text style={styles.nameText} numberOfLines={1}>
-          {participant.name ?? participant.identity}
-          {isLocal ? ' (You)' : ''}
-        </Text>
-      </View>
+      {/* Screen share label badge */}
+      {isScreenShare && (
+        <View style={styles.screenShareBadge}>
+          <Text style={styles.screenShareText}>🖥️ Screen</Text>
+        </View>
+      )}
 
-      {/* Camera off overlay indicator */}
-      {!isVideoOn && (
+      {/* Name badge — hide for screen share tiles to save space */}
+      {!isScreenShare && (
+        <View style={styles.nameBadge}>
+          {isMicMuted && <Text style={styles.muteIcon}>🔇</Text>}
+          <Text style={styles.nameText} numberOfLines={1}>
+            {participant.name ?? participant.identity}
+            {isLocal ? ' (You)' : ''}
+          </Text>
+        </View>
+      )}
+
+      {/* Camera off indicator */}
+      {!isVideoOn && !isScreenShare && (
         <View style={styles.cameraOffBadge}>
           <Text style={styles.cameraOffIcon}>📷</Text>
         </View>
@@ -85,9 +99,12 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(79, 70, 229, 0.3)',
     position: 'relative',
   },
+  tileScreenShare: {
+    backgroundColor: '#0d0d1a',
+    borderColor: 'rgba(34, 197, 94, 0.5)', // green border for screen share
+  },
   video: {
     flex: 1,
-    borderRadius: 16,
   },
   avatarContainer: {
     flex: 1,
@@ -128,6 +145,22 @@ const styles = StyleSheet.create({
   },
   muteIcon: {
     fontSize: 11,
+  },
+  screenShareBadge: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    backgroundColor: 'rgba(34,197,94,0.25)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(34,197,94,0.5)',
+  },
+  screenShareText: {
+    color: '#86efac',
+    fontSize: 11,
+    fontWeight: '700',
   },
   cameraOffBadge: {
     position: 'absolute',
