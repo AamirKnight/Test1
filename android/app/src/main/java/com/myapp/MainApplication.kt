@@ -1,3 +1,4 @@
+// android/app/src/main/java/com/myapp/MainApplication.kt
 
 package com.myapp
 
@@ -17,7 +18,8 @@ import com.oney.WebRTCModule.WebRTCModuleOptions
 import org.webrtc.audio.JavaAudioDeviceModule
 
 import com.myapp.pip.PipPackage
-import com.myapp.blur.BackgroundBlurPackage   // ← NEW
+import com.myapp.blur.BackgroundBlurPackage
+import com.myapp.blur.BackgroundBlurModule   // ← ADD THIS
 
 class MainApplication : Application(), ReactApplication {
 
@@ -27,34 +29,33 @@ class MainApplication : Application(), ReactApplication {
             packageList =
                 PackageList(this).packages.apply {
                     add(PipPackage())
-                    add(BackgroundBlurPackage())   // ← NEW
+                    add(BackgroundBlurPackage())
                 },
         )
     }
 
-   override fun onCreate() {
-    super.onCreate()
+    override fun onCreate() {
+        super.onCreate()
 
-    LiveKitReactNative.setup(this, AudioType.CommunicationAudioType())
+        LiveKitReactNative.setup(this, AudioType.CommunicationAudioType())
 
-    val options = WebRTCModuleOptions.getInstance()
-    options.enableMediaProjectionService = true
+        val options = WebRTCModuleOptions.getInstance()
+        options.enableMediaProjectionService = true
 
-    // ✅ THIS is the correct hook — set the VideoProcessor on the capturer options
-    // WebRTC will call processor.onFrameCaptured() for every camera frame
-    // BEFORE the frame is encoded and sent
-    options.videoProcessor = BackgroundBlurModule.processor
+        // ← REMOVED: options.videoProcessor = BackgroundBlurModule.processor
+        // WebRTCModuleOptions does NOT have a videoProcessor field.
+        // The BlurVideoProcessor is wired as a VideoSink inside the native module instead.
 
-    val audioAttributes = AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-        .build()
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
 
-    options.audioDeviceModule =
-        JavaAudioDeviceModule.builder(this)
-            .setAudioAttributes(audioAttributes)
-            .createAudioDeviceModule()
+        options.audioDeviceModule =
+            JavaAudioDeviceModule.builder(this)
+                .setAudioAttributes(audioAttributes)
+                .createAudioDeviceModule()
 
-    loadReactNative(this)
-}
+        loadReactNative(this)
+    }
 }

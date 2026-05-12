@@ -1,3 +1,5 @@
+// android/app/src/main/java/com/myapp/blur/BackgroundBlurModule.kt
+
 package com.myapp.blur
 
 import android.graphics.*
@@ -16,14 +18,15 @@ import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.max
 
+// ← Top-level constant — visible to BOTH classes in this file
+private const val TAG = "BackgroundBlurModule"
+
 class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     companion object {
-        const val TAG    = "BackgroundBlurModule"
-        const val NAME   = "BackgroundBlurModule"
-        // Singleton so MainApplication can wire it into WebRTCModuleOptions
-        val processor    = BlurVideoProcessor()
+        const val NAME = "BackgroundBlurModule"
+        val processor  = BlurVideoProcessor()
     }
 
     override fun getName() = NAME
@@ -79,9 +82,6 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
 }
 
 // ── BlurVideoProcessor ─────────────────────────────────────────────────────────
-// Implements WebRTC's VideoProcessor — sits between the camera capturer and the
-// encoder. Every frame passes through onFrameCaptured(), we process it, then
-// forward to the sink (encoder).
 
 class BlurVideoProcessor : VideoProcessor {
 
@@ -111,14 +111,12 @@ class BlurVideoProcessor : VideoProcessor {
         virtualBmp = null
     }
 
-    // Called by WebRTC for every captured frame
     override fun onFrameCaptured(frame: VideoFrame) {
         val currentMode = mode
         val currentSink = sink
 
         if (currentSink == null) return
 
-        // Pass through if no effect active or already processing (drop frame)
         if (currentMode == "none" || !busy.compareAndSet(false, true)) {
             currentSink.onFrame(frame)
             return
@@ -135,9 +133,6 @@ class BlurVideoProcessor : VideoProcessor {
             }
 
             val inputImage = InputImage.fromBitmap(bitmap, 0)
-
-            // Tasks.await — safe here because we're already on a background thread
-            // (WebRTC calls onFrameCaptured on its capture thread, not main thread)
             val mask = Tasks.await(segmenter.process(inputImage))
             val processed = applyEffect(bitmap, mask, currentMode)
             bitmap.recycle()
@@ -163,8 +158,6 @@ class BlurVideoProcessor : VideoProcessor {
     override fun setSink(videoSink: VideoSink?) {
         sink = videoSink
     }
-
-    // ── VideoFrame ↔ Bitmap ────────────────────────────────────────────────────
 
     private fun videoFrameToBitmap(frame: VideoFrame): Bitmap? {
         return try {
@@ -235,8 +228,6 @@ class BlurVideoProcessor : VideoProcessor {
         i420.release()
         return frame
     }
-
-    // ── Effect compositing ─────────────────────────────────────────────────────
 
     private fun applyEffect(frame: Bitmap, mask: SegmentationMask, mode: String): Bitmap {
         val w = frame.width; val h = frame.height
