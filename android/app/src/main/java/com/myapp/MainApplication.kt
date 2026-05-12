@@ -1,7 +1,7 @@
 // android/app/src/main/java/com/myapp/MainApplication.kt
 
 package com.myapp
-
+import com.myapp.blur.BlurCapturerFactory
 import android.app.Application
 import android.media.AudioAttributes
 
@@ -19,7 +19,6 @@ import org.webrtc.audio.JavaAudioDeviceModule
 
 import com.myapp.pip.PipPackage
 import com.myapp.blur.BackgroundBlurPackage
-import com.myapp.blur.BackgroundBlurModule   // ← ADD THIS
 
 class MainApplication : Application(), ReactApplication {
 
@@ -42,9 +41,8 @@ class MainApplication : Application(), ReactApplication {
         val options = WebRTCModuleOptions.getInstance()
         options.enableMediaProjectionService = true
 
-        // ← REMOVED: options.videoProcessor = BackgroundBlurModule.processor
-        // WebRTCModuleOptions does NOT have a videoProcessor field.
-        // The BlurVideoProcessor is wired as a VideoSink inside the native module instead.
+        // Wire the custom capturer factory — this is how frames get intercepted
+        options.videoCapturerFactory = BlurCapturerFactory(applicationContext)  // ← ADD
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
