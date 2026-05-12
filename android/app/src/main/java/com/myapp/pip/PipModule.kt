@@ -1,18 +1,4 @@
 // android/app/src/main/java/com/myapp/pip/PipModule.kt
-//
-// A zero-dependency Kotlin native module that exposes Android's built-in
-// PictureInPicture API (API 26+) to React Native JavaScript.
-//
-// JS methods exposed:
-//   PipModule.enterPipMode(width: number, height: number)
-//   PipModule.isPipSupported(): Promise<boolean>
-//   PipModule.isInPipMode(): Promise<boolean>
-//
-// JS events (subscribe via NativeEventEmitter):
-//   "onPipModeChanged" → { isInPipMode: boolean }
-//
-// MainActivity.kt must call PipModule.onPipModeChanged(bool) from
-// onPictureInPictureModeChanged() to fire the JS event.
 
 package com.myapp.pip
 
@@ -30,10 +16,8 @@ class PipModule(private val reactContext: ReactApplicationContext) :
         const val MODULE_NAME = "PipModule"
         const val EVENT_PIP_MODE_CHANGED = "onPipModeChanged"
 
-        // Singleton reference so MainActivity can call back into this module
         private var instance: PipModule? = null
 
-        /** Called from MainActivity.onPictureInPictureModeChanged */
         @JvmStatic
         fun onPipModeChanged(isInPipMode: Boolean) {
             instance?.emitPipModeChanged(isInPipMode)
@@ -46,19 +30,11 @@ class PipModule(private val reactContext: ReactApplicationContext) :
 
     override fun getName(): String = MODULE_NAME
 
-    // ────────────────────────────────────────────────────────────────────────
-    // enterPipMode(width, height)
-    //
-    // width / height → rational aspect ratio (not pixels).
-    //   Portrait call:  enterPipMode(9, 16)
-    //   Landscape call: enterPipMode(16, 9)
-    // No-ops silently on API < 26 or unsupported devices.
-    // ────────────────────────────────────────────────────────────────────────
-
     @ReactMethod
     fun enterPipMode(width: Int, height: Int) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val activity = currentActivity ?: return
+        // ✅ Use reactContext.currentActivity instead of bare currentActivity
+        val activity = reactContext.currentActivity ?: return
 
         activity.runOnUiThread {
             try {
@@ -67,42 +43,30 @@ class PipModule(private val reactContext: ReactApplicationContext) :
                     .build()
                 activity.enterPictureInPictureMode(params)
             } catch (_: Exception) {
-                // Some OEM ROMs deny PiP even on API 26+ — swallow to avoid crash
+                // Some OEM ROMs deny PiP even on API 26+ — swallow silently
             }
         }
     }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // isPipSupported() → Promise<Boolean>
-    // ────────────────────────────────────────────────────────────────────────
 
     @ReactMethod
     fun isPipSupported(promise: Promise) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             promise.resolve(false); return
         }
-        val supported = currentActivity
+        val supported = reactContext.currentActivity
             ?.packageManager
             ?.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
             ?: false
         promise.resolve(supported)
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // isInPipMode() → Promise<Boolean>
-    // ────────────────────────────────────────────────────────────────────────
-
     @ReactMethod
     fun isInPipMode(promise: Promise) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             promise.resolve(false); return
         }
-        promise.resolve(currentActivity?.isInPictureInPictureMode ?: false)
+        promise.resolve(reactContext.currentActivity?.isInPictureInPictureMode ?: false)
     }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // Internal helpers
-    // ────────────────────────────────────────────────────────────────────────
 
     private fun emitPipModeChanged(isInPipMode: Boolean) {
         if (!reactContext.hasActiveReactInstance()) return
@@ -114,7 +78,6 @@ class PipModule(private val reactContext: ReactApplicationContext) :
             .emit(EVENT_PIP_MODE_CHANGED, params)
     }
 
-    // Required boilerplate for NativeEventEmitter on RN ≥ 0.65
     @ReactMethod fun addListener(eventName: String) {}
     @ReactMethod fun removeListeners(count: Int) {}
 

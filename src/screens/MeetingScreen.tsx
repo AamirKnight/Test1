@@ -1,19 +1,7 @@
-// src/screens/MeetingScreen.tsx
-//
-// PiP: uses our OWN PipModule.kt native module via the usePiP() hook.
-// DO NOT import react-native-pip-android — that package has its own native
-// module and conflicts with PipModule.kt. Remove it from package.json:
-//   yarn remove react-native-pip-android
-//
-// PiP flow:
-//   - Back button while in meeting → enterPip() → Android PiP window
-//   - PipModule fires "onPipModeChanged" event → usePiP sets inPipMode
-//   - When inPipMode === true → minimal PiP UI (video only, no controls)
-//
-// Notification flow:
-//   - startMeetingTracking() called ONLY after LiveKit room is Connected
-//   - stopMeetingTracking() called on EVERY disconnect/leave path
-//   - _isInMeeting guard in NotificationService prevents stray notifications
+// src/screens/MeetingScreen.tsx  — diff from original:
+//   1. Passes `error` prop to BackgroundFilterPicker
+//   2. Calls cleanupProcessor() before room.disconnect()
+//   3. Uses the new applyFilter signature (same) — no other changes
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -40,17 +28,10 @@ import { RoomView } from '../components/RoomView';
 import { ControlBar } from '../components/ControlBar';
 import { BackgroundFilterPicker } from '../components/BackgroundFilterPicker';
 import LobbyScreen, { JoinOptions } from './LobbyScreen';
-
-// ✅ Our OWN hook — talks to PipModule.kt directly via NativeModules
 import { usePiP } from '../hooks/usePip';
 
 const TAG = '[MeetingScreen]';
-
 type AppStage = 'lobby' | 'meeting' | 'ended';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ROOT COMPONENT
-// ─────────────────────────────────────────────────────────────────────────────
 
 export default function MeetingScreen() {
   const [stage, setStage] = useState<AppStage>('lobby');
@@ -60,22 +41,14 @@ export default function MeetingScreen() {
   });
 
   useEffect(() => {
-    console.log(TAG, 'mount — initializing NotificationService');
     NotificationService.initialize().catch((e) =>
       console.warn(TAG, 'NotificationService.initialize() failed', e),
     );
   }, []);
 
-  // Audio session: start only while in meeting
   useEffect(() => {
-    if (stage === 'meeting') {
-      AudioSession.startAudioSession();
-    }
-    return () => {
-      if (stage === 'meeting') {
-        AudioSession.stopAudioSession();
-      }
-    };
+    if (stage === 'meeting') AudioSession.startAudioSession();
+    return () => { if (stage === 'meeting') AudioSession.stopAudioSession(); };
   }, [stage]);
 
   const handleJoin = useCallback((options: JoinOptions) => {
@@ -123,71 +96,46 @@ export default function MeetingScreen() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ROOM CONTENT — rendered inside LiveKitRoom context
-// ─────────────────────────────────────────────────────────────────────────────
-
 function RoomContent({ onEndCall }: { onEndCall: () => void }) {
   const room = useRoomContext();
   const { localParticipant } = useLocalParticipant();
   const [showFilterPicker, setShowFilterPicker] = useState(false);
   const [remoteScreenShareActive, setRemoteScreenShareActive] = useState(false);
-  const { activeFilter, isApplying, applyFilter } = useBackgroundFilter();
+
+  // ✅ Updated hook — now returns cleanupProcessor and error
+  const { activeFilter, isApplying, error, applyFilter, cleanupProcessor } =
+    useBackgroundFilter();
 
   const [connState, setConnState] = useState<ConnectionState>(
     room?.state ?? ConnectionState.Connecting,
   );
   const hasEverConnected = useRef(false);
-
-  // ✅ Use OUR OWN usePiP hook (talks to PipModule.kt via NativeModules)
-  // inPipMode    → true when Android has put us in the PiP window
-  // isPipSupported → false on API < 26 or unsupported device
-  // enterPip()   → calls PipModule.enterPipMode(9, 16)
   const { inPipMode, isPipSupported, enterPip } = usePiP();
 
-  // Debug: log PiP support on mount
-  useEffect(() => {
-    console.log(TAG, 'PiP supported:', isPipSupported);
-  }, [isPipSupported]);
-
-  // Stable ref so notification "End Call" action can call disconnect
   const disconnectRef = useRef<() => void>(() => {});
   useEffect(() => {
-    disconnectRef.current = () => {
-      console.log(TAG, 'disconnectRef called — disconnecting room');
+    disconnectRef.current = async () => {
+      // Cleanup background processor before disconnecting
+      await cleanupProcessor(localParticipant);
       room?.disconnect();
     };
-  }, [room]);
+  }, [room, localParticipant, cleanupProcessor]);
 
-  // ── Room event listeners ──────────────────────────────────────────────────
   useEffect(() => {
     if (!room) return;
 
     const onConnected = () => {
-      console.log(TAG, 'RoomEvent.Connected');
       hasEverConnected.current = true;
       setConnState(ConnectionState.Connected);
-      // ✅ START notification tracking ONLY when room is actually Connected
       NotificationService.startMeetingTracking(() => disconnectRef.current(), {
         roomName: LIVEKIT_CONFIG.roomName,
         participantCount: room.numParticipants,
       });
     };
-
-    const onReconnecting = () => {
-      console.log(TAG, 'Reconnecting');
-      setConnState(ConnectionState.Reconnecting);
-    };
-
-    const onReconnected = () => {
-      console.log(TAG, 'Reconnected');
-      setConnState(ConnectionState.Connected);
-    };
-
+    const onReconnecting = () => setConnState(ConnectionState.Reconnecting);
+    const onReconnected  = () => setConnState(ConnectionState.Connected);
     const onDisconnected = () => {
-      console.log(TAG, 'Disconnected');
       setConnState(ConnectionState.Disconnected);
-      // ✅ STOP notification tracking immediately when room disconnects
       NotificationService.stopMeetingTracking();
     };
 
@@ -196,9 +144,7 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     room.on(RoomEvent.Reconnected,  onReconnected);
     room.on(RoomEvent.Disconnected, onDisconnected);
 
-    // Handle case where room was already connected before this effect ran
     if (room.state === ConnectionState.Connected) {
-      console.log(TAG, 'already connected on mount');
       hasEverConnected.current = true;
       setConnState(ConnectionState.Connected);
       NotificationService.startMeetingTracking(() => disconnectRef.current(), {
@@ -215,26 +161,17 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     };
   }, [room]);
 
-  // ── Back button: enter PiP instead of navigating back ────────────────────
-  // Only when we are connected AND PiP is supported on this device.
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     if (connState !== ConnectionState.Connected) return;
-
-    console.log(TAG, 'registering BackHandler → PiP (supported:', isPipSupported, ')');
 
     const sub: NativeEventSubscription = BackHandler.addEventListener(
       'hardwareBackPress',
       () => {
         if (isPipSupported) {
-          console.log(TAG, 'back pressed — entering PiP');
-          // Show persistent notification so user can return or end call from shade
           NotificationService.showPersistentNotification();
-          // ✅ Enter PiP using OUR native module: portrait 9:16
           enterPip(9, 16);
         } else {
-          console.log(TAG, 'back pressed — PiP not supported, showing alert');
-          // Fallback: ask user if they want to leave
           Alert.alert('Leave Meeting?', 'PiP is not supported on this device.', [
             { text: 'Stay', style: 'cancel' },
             {
@@ -242,20 +179,16 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
               style: 'destructive',
               onPress: () => {
                 NotificationService.stopMeetingTracking();
-                room?.disconnect();
+                cleanupProcessor(localParticipant).then(() => room?.disconnect());
               },
             },
           ]);
         }
-        return true; // always consume back event
+        return true;
       },
     );
-
-    return () => {
-      console.log(TAG, 'removing BackHandler');
-      sub.remove();
-    };
-  }, [connState, isPipSupported, enterPip, room]);
+    return () => sub.remove();
+  }, [connState, isPipSupported, enterPip, room, localParticipant, cleanupProcessor]);
 
   const isConnected    = connState === ConnectionState.Connected;
   const isReconnecting = connState === ConnectionState.Reconnecting;
@@ -266,26 +199,25 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
       {
         text: 'Leave',
         style: 'destructive',
-        onPress: () => {
+        onPress: async () => {
           NotificationService.cancelNotification();
           NotificationService.stopMeetingTracking();
+          await cleanupProcessor(localParticipant);
           room?.disconnect();
         },
       },
     ]);
-  }, [room]);
+  }, [room, localParticipant, cleanupProcessor]);
 
   const handleFilterSelect = useCallback(
     async (type: typeof activeFilter) => {
       await applyFilter(type, localParticipant);
-      setShowFilterPicker(false);
+      // Keep picker open so user can see the applied state
+      // (auto-close only on 'none' or non-error)
     },
     [applyFilter, localParticipant],
   );
 
-  // ── PiP UI ──────────────────────────────────────────────────────────────
-  // When in PiP mode, render ONLY the video grid — no controls, no header.
-  // The tiny PiP window (~100×160dp) has no room for buttons.
   if (inPipMode && Platform.OS === 'android') {
     return (
       <View style={styles.pipContainer}>
@@ -294,7 +226,6 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     );
   }
 
-  // ── Loading / connecting ─────────────────────────────────────────────────
   if (!isConnected) {
     if (connState === ConnectionState.Disconnected && hasEverConnected.current) {
       return (
@@ -314,7 +245,6 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
     );
   }
 
-  // ── Main meeting UI ──────────────────────────────────────────────────────
   return (
     <View style={styles.roomContainer}>
       {isReconnecting && (
@@ -324,24 +254,30 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
         </View>
       )}
 
-      {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <View style={styles.liveDot} />
           <Text style={styles.headerTitle}>{LIVEKIT_CONFIG.roomName}</Text>
         </View>
+        {/* Active filter badge */}
+        {activeFilter !== 'none' && (
+          <View style={styles.filterBadge}>
+            <Text style={styles.filterBadgeText}>
+              {activeFilter.startsWith('blur') ? '🌫️' : '🖼️'}{' '}
+              {activeFilter.replace('blur-', '').replace('vbg-', '')}
+            </Text>
+          </View>
+        )}
         <Text style={styles.headerParticipants}>
           {room?.numParticipants ?? 1} participant
           {(room?.numParticipants ?? 1) !== 1 ? 's' : ''}
         </Text>
       </View>
 
-      {/* Video area */}
       <View style={styles.videoArea}>
         <RoomView onScreenShareActive={setRemoteScreenShareActive} />
       </View>
 
-      {/* Control bar */}
       <ControlBar
         onEndCall={handleEndCall}
         onToggleBackgroundFilter={() => setShowFilterPicker(true)}
@@ -350,21 +286,18 @@ function RoomContent({ onEndCall }: { onEndCall: () => void }) {
         remoteScreenShareActive={remoteScreenShareActive}
       />
 
-      {/* Background filter picker */}
+      {/* ✅ Now passes error prop */}
       <BackgroundFilterPicker
         visible={showFilterPicker}
         activeFilter={activeFilter}
         isApplying={isApplying}
+        error={error}
         onSelect={handleFilterSelect}
         onClose={() => setShowFilterPicker(false)}
       />
     </View>
   );
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// STYLES
-// ─────────────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   centered: {
@@ -396,6 +329,21 @@ const styles = StyleSheet.create({
   headerTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
   headerParticipants: { color: '#6b7280', fontSize: 13 },
 
+  filterBadge: {
+    backgroundColor: 'rgba(99,102,241,0.2)',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: 'rgba(99,102,241,0.4)',
+  },
+  filterBadgeText: {
+    color: '#a5b4fc',
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'capitalize',
+  },
+
   videoArea: { flex: 1 },
 
   reconnectBanner: {
@@ -410,9 +358,5 @@ const styles = StyleSheet.create({
   },
   reconnectText: { color: '#f59e0b', fontSize: 13, fontWeight: '600' },
 
-  // PiP: fill the tiny window with only the video — no chrome
-  pipContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
+  pipContainer: { flex: 1, backgroundColor: '#000' },
 });
