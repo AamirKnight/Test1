@@ -32,24 +32,29 @@ class MainApplication : Application(), ReactApplication {
         )
     }
 
-    override fun onCreate() {
-        super.onCreate()
+   override fun onCreate() {
+    super.onCreate()
 
-        LiveKitReactNative.setup(this, AudioType.CommunicationAudioType())
+    LiveKitReactNative.setup(this, AudioType.CommunicationAudioType())
 
-        val options = WebRTCModuleOptions.getInstance()
-        options.enableMediaProjectionService = true
+    val options = WebRTCModuleOptions.getInstance()
+    options.enableMediaProjectionService = true
 
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build()
+    // ✅ THIS is the correct hook — set the VideoProcessor on the capturer options
+    // WebRTC will call processor.onFrameCaptured() for every camera frame
+    // BEFORE the frame is encoded and sent
+    options.videoProcessor = BackgroundBlurModule.processor
 
-        options.audioDeviceModule =
-            JavaAudioDeviceModule.builder(this)
-                .setAudioAttributes(audioAttributes)
-                .createAudioDeviceModule()
+    val audioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
 
-        loadReactNative(this)
-    }
+    options.audioDeviceModule =
+        JavaAudioDeviceModule.builder(this)
+            .setAudioAttributes(audioAttributes)
+            .createAudioDeviceModule()
+
+    loadReactNative(this)
+}
 }
