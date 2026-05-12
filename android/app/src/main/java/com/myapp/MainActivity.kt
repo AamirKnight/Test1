@@ -1,41 +1,55 @@
-// android/app/src/main/java/com/myapp/MainActivity.kt
 
 package com.myapp
 
-import android.content.res.Configuration
-import android.os.Bundle
+import android.app.Application
+import android.media.AudioAttributes
 
-import com.facebook.react.ReactActivity
-import com.facebook.react.ReactActivityDelegate
-import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
-import com.facebook.react.defaults.DefaultReactActivityDelegate
+import com.facebook.react.PackageList
+import com.facebook.react.ReactApplication
+import com.facebook.react.ReactHost
+import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
+import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
+
+import com.livekit.reactnative.LiveKitReactNative
+import com.livekit.reactnative.audio.AudioType
 
 import com.oney.WebRTCModule.WebRTCModuleOptions
-import com.myapp.pip.PipModule   // ← our own module, zero npm deps
+import org.webrtc.audio.JavaAudioDeviceModule
 
-class MainActivity : ReactActivity() {
+import com.myapp.pip.PipPackage
+import com.myapp.blur.BackgroundBlurPackage   // ← NEW
 
-    override fun onCreate(savedInstanceState: Bundle?) {
+class MainApplication : Application(), ReactApplication {
+
+    override val reactHost: ReactHost by lazy {
+        getDefaultReactHost(
+            context = applicationContext,
+            packageList =
+                PackageList(this).packages.apply {
+                    add(PipPackage())
+                    add(BackgroundBlurPackage())   // ← NEW
+                },
+        )
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+
+        LiveKitReactNative.setup(this, AudioType.CommunicationAudioType())
+
         val options = WebRTCModuleOptions.getInstance()
         options.enableMediaProjectionService = true
-        super.onCreate(savedInstanceState)
+
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+
+        options.audioDeviceModule =
+            JavaAudioDeviceModule.builder(this)
+                .setAudioAttributes(audioAttributes)
+                .createAudioDeviceModule()
+
+        loadReactNative(this)
     }
-
-    /**
-     * Android fires this whenever PiP mode enters or exits.
-     * We forward it to our PipModule so the JS NativeEventEmitter
-     * can notify usePiP() subscribers.
-     */
-    override fun onPictureInPictureModeChanged(
-        isInPictureInPictureMode: Boolean,
-        newConfig: Configuration,
-    ) {
-        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
-        PipModule.onPipModeChanged(isInPictureInPictureMode)
-    }
-
-    override fun getMainComponentName(): String = "MyApp"
-
-    override fun createReactActivityDelegate(): ReactActivityDelegate =
-        DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
 }
