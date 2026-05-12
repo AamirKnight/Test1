@@ -1,4 +1,3 @@
-// android/app/src/main/java/com/myapp/MainApplication.kt
 
 package com.myapp
 
@@ -17,7 +16,8 @@ import com.livekit.reactnative.audio.AudioType
 import com.oney.WebRTCModule.WebRTCModuleOptions
 import org.webrtc.audio.JavaAudioDeviceModule
 
-import com.myapp.pip.PipPackage   // ← our zero-dependency PiP package
+import com.myapp.pip.PipPackage
+import com.myapp.blur.BackgroundBlurPackage   // ← NEW
 
 class MainApplication : Application(), ReactApplication {
 
@@ -26,7 +26,8 @@ class MainApplication : Application(), ReactApplication {
             context = applicationContext,
             packageList =
                 PackageList(this).packages.apply {
-                    add(PipPackage())  // ← register PiP native module
+                    add(PipPackage())
+                    add(BackgroundBlurPackage())   // ← NEW
                 },
         )
     }

@@ -1,33 +1,19 @@
 // android/app/src/main/java/com/myapp/blur/BackgroundBlurModule.kt
-//
-// Native background blur/virtual-background processor for LiveKit React Native.
-// Uses Google MLKit Selfie Segmentation — runs fully on-device.
-//
-// How it works:
-//   1. JS calls startProcessor(mode, blurRadius?, imagePath?)
-//   2. We grab the local camera SurfaceTexture via WebRTC internals
-//   3. Each frame is segmented → background replaced (blur or image)
-//   4. Output is fed back into the WebRTC pipeline via a custom capturer
-//   5. JS calls stopProcessor() to tear down
-//
-// Add to build.gradle (app):
-//   implementation 'com.google.mlkit:segmentation-selfie:16.0.0-beta6'
-//   implementation 'com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1'
 
 package com.myapp.blur
 
 import android.graphics.*
 import android.os.Handler
 import android.os.HandlerThread
-import android.renderscript.*
 import android.util.Log
 import com.facebook.react.bridge.*
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.SegmentationMask
+import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.LinkedBlockingQueue
+import kotlin.math.min
+import kotlin.math.max
 
 class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -36,52 +22,39 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
         const val TAG = "BackgroundBlurModule"
         const val MODULE_NAME = "BackgroundBlurModule"
 
-        // JS-visible events
         const val EVENT_PROCESSOR_READY   = "onProcessorReady"
         const val EVENT_PROCESSOR_ERROR   = "onProcessorError"
         const val EVENT_PROCESSOR_STOPPED = "onProcessorStopped"
 
-        // Supported modes
         const val MODE_BLUR    = "blur"
         const val MODE_VIRTUAL = "virtual"
         const val MODE_NONE    = "none"
     }
 
-    // ── Processor state ────────────────────────────────────────────────────────
+    // ── State ──────────────────────────────────────────────────────────────────
 
     private var processorThread: HandlerThread? = null
     private var processorHandler: Handler? = null
     private val isRunning = AtomicBoolean(false)
 
-    // MLKit segmenter — kept alive between mode switches (hot-swap)
-    private var segmenter = Segmentation.getClient(
+    private val segmenter = Segmentation.getClient(
         SelfieSegmenterOptions.Builder()
             .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
             .enableRawSizeMask()
             .build()
     )
 
-    private var currentMode  = MODE_NONE
-    private var blurRadius   = 25f
+    private var currentMode   = MODE_NONE
+    private var blurRadius    = 25f
     private var virtualBitmap: Bitmap? = null
-
-    // RenderScript context for fast blur
-    private var rs: RenderScript? = null
-    private var blurScript: ScriptIntrinsicBlur? = null
 
     override fun getName() = MODULE_NAME
 
     // ── JS API ─────────────────────────────────────────────────────────────────
 
-    /**
-     * startProcessor(mode: 'blur'|'virtual'|'none', blurRadius?: number, imagePath?: string)
-     *
-     * Called from useBackgroundFilter when the user picks a filter.
-     * mode='none' is the same as calling stopProcessor().
-     */
     @ReactMethod
     fun startProcessor(mode: String, blurRadiusJs: Int, imagePath: String?, promise: Promise) {
-        Log.d(TAG, "startProcessor mode=$mode blurRadius=$blurRadiusJs imagePath=$imagePath")
+        Log.d(TAG, "startProcessor mode=$mode blurRadius=$blurRadiusJs")
 
         if (mode == MODE_NONE) {
             stopProcessorInternal()
@@ -97,7 +70,7 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
                 virtualBitmap = loadBitmap(imagePath)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to load virtual background image", e)
-                promise.reject("IMG_LOAD_FAIL", "Could not load background image: ${e.message}")
+                promise.reject("IMG_LOAD_FAIL", "Could not load image: ${e.message}")
                 return
             }
         }
@@ -108,12 +81,6 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
             isRunning.set(true)
         }
 
-        // Initialise RenderScript for blur
-        if (rs == null) {
-            rs = RenderScript.create(reactContext)
-            blurScript = ScriptIntrinsicBlur.create(rs, Element.U8_4(rs))
-        }
-
         emitEvent(EVENT_PROCESSOR_READY, Arguments.createMap().apply {
             putString("mode", mode)
         })
@@ -121,10 +88,6 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
         promise.resolve(true)
     }
 
-    /**
-     * switchMode(mode, blurRadius?, imagePath?)
-     * Hot-swap the effect without re-creating the segmenter.
-     */
     @ReactMethod
     fun switchMode(mode: String, blurRadiusJs: Int, imagePath: String?, promise: Promise) {
         Log.d(TAG, "switchMode mode=$mode")
@@ -141,25 +104,12 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
         promise.resolve(true)
     }
 
-    /**
-     * stopProcessor() — tear down segmenter + RenderScript
-     */
     @ReactMethod
     fun stopProcessor(promise: Promise) {
         stopProcessorInternal()
         promise.resolve(true)
     }
 
-    /**
-     * processFrame(base64Jpeg) → Promise<base64Jpeg>
-     *
-     * Called per-frame from JS (via the LiveKit TrackProcessor shim in
-     * useBackgroundFilter).  Accepts a JPEG frame, segments it, blends the
-     * background, returns a modified JPEG.
-     *
-     * NOTE: For production you'd hook this at the C++ WebRTC layer.
-     * This JS-bridge approach works but adds ~15-30 ms latency per frame.
-     */
     @ReactMethod
     fun processFrame(base64Jpeg: String, promise: Promise) {
         if (!isRunning.get() || currentMode == MODE_NONE) {
@@ -180,14 +130,15 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
                         val out = java.io.ByteArrayOutputStream()
                         result.compress(Bitmap.CompressFormat.JPEG, 90, out)
                         val encoded = android.util.Base64.encodeToString(
-                            out.toByteArray(), android.util.Base64.DEFAULT)
+                            out.toByteArray(), android.util.Base64.DEFAULT
+                        )
                         bitmap.recycle()
                         result.recycle()
                         promise.resolve(encoded)
                     }
                     .addOnFailureListener { e ->
                         Log.e(TAG, "MLKit segmentation failed", e)
-                        promise.resolve(base64Jpeg) // pass-through on error
+                        promise.resolve(base64Jpeg)
                     }
             } catch (e: Exception) {
                 Log.e(TAG, "processFrame error", e)
@@ -196,18 +147,20 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
         } ?: promise.resolve(base64Jpeg)
     }
 
-    // ── Internal helpers ───────────────────────────────────────────────────────
+    // ── Effect compositing ─────────────────────────────────────────────────────
 
     private fun applyEffect(frame: Bitmap, mask: SegmentationMask): Bitmap {
         val w = frame.width
         val h = frame.height
+
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
 
-        // 1. Draw background (blur or virtual image)
+        // 1. Draw background layer
         when (currentMode) {
             MODE_BLUR -> {
-                val blurred = blurBitmap(frame)
+                // ✅ Pure Kotlin stack blur — no RenderScript / no deprecated APIs
+                val blurred = stackBlur(frame, blurRadius.toInt().coerceIn(1, 25))
                 canvas.drawBitmap(blurred, 0f, 0f, null)
                 blurred.recycle()
             }
@@ -224,14 +177,12 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
             else -> canvas.drawColor(Color.BLACK)
         }
 
-        // 2. Composite the person on top using the segmentation mask
-        val maskBuf  = mask.buffer
-        val maskW    = mask.width
-        val maskH    = mask.height
-        val paint    = Paint(Paint.ANTI_ALIAS_FLAG)
+        // 2. Composite person on top using MLKit confidence mask
+        val maskBuffer = mask.buffer   // FloatBuffer
+        val maskW      = mask.width
+        val maskH      = mask.height
 
-        // Build a per-pixel alpha from the confidence mask
-        val pixels   = IntArray(w * h)
+        val pixels = IntArray(w * h)
         frame.getPixels(pixels, 0, w, 0, 0, w, h)
 
         val scaleX = maskW.toFloat() / w
@@ -241,9 +192,10 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
             for (x in 0 until w) {
                 val mx = (x * scaleX).toInt().coerceIn(0, maskW - 1)
                 val my = (y * scaleY).toInt().coerceIn(0, maskH - 1)
-                val confidence = maskBuf.get(my * maskW + mx) // FloatBuffer
-                val alpha = (confidence * 255).toInt().coerceIn(0, 255)
-                val orig  = pixels[y * w + x]
+                // FloatBuffer.get(index) — explicit positional read, no property ambiguity
+                val confidence = maskBuffer.get(my * maskW + mx)
+                val alpha      = (confidence * 255f).toInt().coerceIn(0, 255)
+                val orig       = pixels[y * w + x]
                 pixels[y * w + x] = Color.argb(
                     alpha,
                     Color.red(orig),
@@ -252,7 +204,7 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
                 )
             }
         }
-        maskBuf.rewind()
+        maskBuffer.rewind()
 
         val personBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         personBitmap.setPixels(pixels, 0, w, 0, 0, w, h)
@@ -262,19 +214,82 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
         return result
     }
 
-    private fun blurBitmap(src: Bitmap): Bitmap {
-        val rs        = this.rs ?: return src
-        val blurSrc   = src.copy(Bitmap.Config.ARGB_8888, true)
-        val alloc     = Allocation.createFromBitmap(rs, blurSrc)
-        val allocOut  = Allocation.createTyped(rs, alloc.type)
-        blurScript?.setRadius(blurRadius.coerceIn(1f, 25f))
-        blurScript?.setInput(alloc)
-        blurScript?.forEach(allocOut)
-        allocOut.copyTo(blurSrc)
-        alloc.destroy()
-        allocOut.destroy()
-        return blurSrc
+    // ── Pure-Kotlin Stack Blur ─────────────────────────────────────────────────
+    //
+    // Mario Klingemann's stack blur — works on all API levels, no deprecated APIs,
+    // comparable quality to ScriptIntrinsicBlur at radius ≤ 25.
+
+    private fun stackBlur(src: Bitmap, radius: Int): Bitmap {
+        val r = radius.coerceAtLeast(1)
+        val bitmap = src.copy(Bitmap.Config.ARGB_8888, true)
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val div       = 2 * r + 1
+        val tableSize = div * 256
+        val divSum    = (r + 1) * (r + 1)
+        val mulTable  = IntArray(tableSize) { it / divSum }
+
+        // Horizontal pass
+        for (y in 0 until h) {
+            var rSum = 0; var gSum = 0; var bSum = 0
+            var rOut = 0; var gOut = 0; var bOut = 0
+
+            for (i in -r..r) {
+                val p = pixels[y * w + min(max(i, 0), w - 1)]
+                val weight = r + 1 - kotlin.math.abs(i)
+                rSum += Color.red(p)   * weight
+                gSum += Color.green(p) * weight
+                bSum += Color.blue(p)  * weight
+            }
+
+            for (x in 0 until w) {
+                pixels[y * w + x] = Color.rgb(
+                    mulTable[min(rSum, tableSize - 1)],
+                    mulTable[min(gSum, tableSize - 1)],
+                    mulTable[min(bSum, tableSize - 1)]
+                )
+                val leftPx  = pixels[y * w + max(x - r, 0)]
+                val rightPx = pixels[y * w + min(x + r + 1, w - 1)]
+                rSum += Color.red(rightPx)   - Color.red(leftPx)
+                gSum += Color.green(rightPx) - Color.green(leftPx)
+                bSum += Color.blue(rightPx)  - Color.blue(leftPx)
+            }
+        }
+
+        // Vertical pass
+        for (x in 0 until w) {
+            var rSum = 0; var gSum = 0; var bSum = 0
+
+            for (i in -r..r) {
+                val p = pixels[min(max(i, 0), h - 1) * w + x]
+                val weight = r + 1 - kotlin.math.abs(i)
+                rSum += Color.red(p)   * weight
+                gSum += Color.green(p) * weight
+                bSum += Color.blue(p)  * weight
+            }
+
+            for (y in 0 until h) {
+                pixels[y * w + x] = Color.rgb(
+                    mulTable[min(rSum, tableSize - 1)],
+                    mulTable[min(gSum, tableSize - 1)],
+                    mulTable[min(bSum, tableSize - 1)]
+                )
+                val topPx    = pixels[max(y - r, 0) * w + x]
+                val bottomPx = pixels[min(y + r + 1, h - 1) * w + x]
+                rSum += Color.red(bottomPx)   - Color.red(topPx)
+                gSum += Color.green(bottomPx) - Color.green(topPx)
+                bSum += Color.blue(bottomPx)  - Color.blue(topPx)
+            }
+        }
+
+        bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
+        return bitmap
     }
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
 
     private fun loadBitmap(path: String): Bitmap {
         return if (path.startsWith("http")) {
@@ -282,7 +297,8 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
             BitmapFactory.decodeStream(url.openStream())
                 ?: throw Exception("null bitmap from URL")
         } else {
-            BitmapFactory.decodeFile(path) ?: throw Exception("null bitmap from file")
+            BitmapFactory.decodeFile(path)
+                ?: throw Exception("null bitmap from file: $path")
         }
     }
 
@@ -291,9 +307,6 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
         processorThread?.quit()
         processorThread = null
         processorHandler = null
-        rs?.destroy()
-        rs = null
-        blurScript = null
         currentMode = MODE_NONE
         emitEvent(EVENT_PROCESSOR_STOPPED, Arguments.createMap())
     }
@@ -301,7 +314,10 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
     private fun emitEvent(name: String, params: WritableMap) {
         if (!reactContext.hasActiveReactInstance()) return
         reactContext
-            .getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+            .getJSModule(
+                com.facebook.react.modules.core.DeviceEventManagerModule
+                    .RCTDeviceEventEmitter::class.java
+            )
             .emit(name, params)
     }
 
@@ -311,5 +327,8 @@ class BackgroundBlurModule(private val reactContext: ReactApplicationContext) :
     override fun invalidate() {
         super.invalidate()
         stopProcessorInternal()
+        segmenter.close()
+        virtualBitmap?.recycle()
+        virtualBitmap = null
     }
 }
