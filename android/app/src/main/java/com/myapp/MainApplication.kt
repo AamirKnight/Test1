@@ -1,7 +1,7 @@
 // android/app/src/main/java/com/myapp/MainApplication.kt
 
 package com.myapp
-import com.myapp.blur.BlurCapturerFactory
+
 import android.app.Application
 import android.media.AudioAttributes
 
@@ -40,9 +40,7 @@ class MainApplication : Application(), ReactApplication {
 
         val options = WebRTCModuleOptions.getInstance()
         options.enableMediaProjectionService = true
-
-        // Wire the custom capturer factory — this is how frames get intercepted
-        options.videoCapturerFactory = BlurCapturerFactory(applicationContext)  // ← ADD
+        // ← videoCapturerFactory line REMOVED — API no longer exists in v144
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
